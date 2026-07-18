@@ -74,11 +74,9 @@ pub const Connection = struct {
     pub fn execute(self: *Connection, sql: []const u8, bind_args: anytype) err.Error!void {
         var stmt = try self.prepare(sql);
         defer stmt.deinit();
-        const Args = @TypeOf(bind_args);
-        const info = @typeInfo(Args);
-        if (info == .@"struct" and info.@"struct".fields.len > 0) {
-            try stmt.bind(bind_args);
-        }
+        // Bind unconditionally so empty args and invalid shapes are validated
+        // against the statement's parameter count (fail closed).
+        try stmt.bind(bind_args);
         try stmt.execute();
     }
 

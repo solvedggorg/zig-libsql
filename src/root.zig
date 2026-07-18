@@ -202,3 +202,32 @@ test "prepare rejects trailing statement" {
     var ok = try conn.prepare("select 1;  ");
     ok.deinit();
 }
+
+test "bind rejects argument count mismatch" {
+    const gpa = std.testing.allocator;
+    var db = try Database.open(gpa, .{ .path = ":memory:" });
+    defer db.deinit();
+    var conn = db.connect();
+    try conn.exec("create table t(a integer, b integer);", .{});
+    var ins = try conn.prepare("insert into t(a, b) values (?1, ?2);");
+    defer ins.deinit();
+    try std.testing.expectError(error.Bind, ins.bind(.{1}));
+    // Empty args against a parameterized statement must also fail closed.
+    try std.testing.expectError(error.Bind, conn.execute("insert into t(a, b) values (?1, ?2);", .{}));
+}
+
+test "statement execute is idempotent after done" {
+    const gpa = std.testing.allocator;
+    var db = try Database.open(gpa, .{ .path = ":memory:" });
+    defer db.deinit();
+    var conn = db.connect();
+    try conn.exec("create table t(x integer);", .{});
+    var ins = try conn.prepare("insert into t(x) values (1);");
+    defer ins.deinit();
+    try ins.execute();
+    try ins.execute(); // no-op: must not insert a second row
+    var sel = try conn.prepare("select count(*) from t;");
+    defer sel.deinit();
+    const row = (try sel.step()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(i64, 1), try row.int(0));
+}

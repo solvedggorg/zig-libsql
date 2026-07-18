@@ -83,7 +83,9 @@ pub const Statement = struct {
         const info = @typeInfo(Args);
         switch (info) {
             .@"struct" => |s| {
-                if (!s.is_tuple and s.fields.len == 0) return;
+                // Fail closed: the argument count must match the statement's
+                // parameter count so omitted values are not silently bound NULL.
+                if (s.fields.len != self.parameterCount()) return error.Bind;
                 inline for (s.fields, 0..) |field, i| {
                     const idx = i + 1;
                     const field_val = @field(args, field.name);
@@ -165,6 +167,9 @@ pub const Statement = struct {
 
     /// Run to completion (for INSERT/UPDATE/DELETE). Errors if a row is produced.
     pub fn execute(self: *Statement) err.Error!void {
+        // sqlite3_step auto-resets a completed statement, so guard against
+        // re-running the same DML on a second execute() call.
+        if (self.done) return;
         while (true) {
             const rc = c.sqlite3_step(self.stmt);
             switch (rc) {
