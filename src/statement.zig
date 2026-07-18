@@ -5,6 +5,7 @@ const value = @import("value.zig");
 const rows = @import("rows.zig");
 const remote = @import("backend/remote.zig");
 const pipeline = @import("backend/hrana/pipeline.zig");
+const batch_mod = @import("batch.zig");
 
 pub const Statement = struct {
     kind: enum { local, remote },
@@ -17,9 +18,12 @@ pub const Statement = struct {
     // remote
     session: ?*remote.Session = null,
     sql: ?[]u8 = null,
+    /// Positional binds. A `.text`/`.blob` entry owns its slice (allocated by
+    /// this statement); replacing an index frees the previous owned slice.
     binds: std.ArrayListUnmanaged(value.Value) = .empty,
-    /// Owned string/blob storage for bind values that need ownership.
-    bind_storage: std.ArrayListUnmanaged([]u8) = .empty,
+    /// Named binds. Each entry owns its `name`, and a `.text`/`.blob` value owns
+    /// its slice; rebinding a name replaces in place instead of appending.
+    named_binds: std.ArrayListUnmanaged(batch_mod.NamedArg) = .empty,
     result: ?pipeline.StmtResult = null,
     row_index: usize = 0,
 
@@ -33,9 +37,13 @@ pub const Statement = struct {
             .remote => {
                 if (self.result) |*r| r.deinit(self.allocator);
                 if (self.sql) |s| self.allocator.free(s);
-                for (self.bind_storage.items) |s| self.allocator.free(s);
-                self.bind_storage.deinit(self.allocator);
+                for (self.binds.items) |v| freeOwnedValue(self.allocator, v);
                 self.binds.deinit(self.allocator);
+                for (self.named_binds.items) |entry| {
+                    self.allocator.free(entry.name);
+                    freeOwnedValue(self.allocator, entry.value);
+                }
+                self.named_binds.deinit(self.allocator);
             },
         }
         self.* = undefined;
@@ -43,9 +51,7 @@ pub const Statement = struct {
 
     pub fn reset(self: *Statement) err.Error!void {
         switch (self.kind) {
-            .local => {
-                try err.mapRc(c.sqlite3_reset(self.stmt.?));
-            },
+            .local => try err.mapRc(c.sqlite3_reset(self.stmt.?)),
             .remote => {
                 if (self.result) |*r| {
                     r.deinit(self.allocator);
@@ -61,12 +67,18 @@ pub const Statement = struct {
         switch (self.kind) {
             .local => try err.mapRc(c.sqlite3_clear_bindings(self.stmt.?)),
             .remote => {
-                for (self.bind_storage.items) |s| self.allocator.free(s);
-                self.bind_storage.clearRetainingCapacity();
+                for (self.binds.items) |v| freeOwnedValue(self.allocator, v);
                 self.binds.clearRetainingCapacity();
+                for (self.named_binds.items) |entry| {
+                    self.allocator.free(entry.name);
+                    freeOwnedValue(self.allocator, entry.value);
+                }
+                self.named_binds.clearRetainingCapacity();
             },
         }
     }
+
+    // --- positional binds ---
 
     pub fn bindNull(self: *Statement, idx: usize) err.Error!void {
         switch (self.kind) {
@@ -93,26 +105,20 @@ pub const Statement = struct {
         switch (self.kind) {
             .local => {
                 const destructor: ?*const anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, c.SQLITE_TRANSIENT))));
-                const rc = c.sqlite3_bind_text(
+                try err.mapRc(c.sqlite3_bind_text(
                     self.stmt.?,
                     @intCast(idx),
                     if (text.len == 0) "" else text.ptr,
                     @intCast(text.len),
                     destructor,
-                );
-                try err.mapRc(rc);
+                ));
             },
             .remote => {
-                if (idx == 0) return error.Bind;
                 const owned = self.allocator.dupe(u8, text) catch return error.OutOfMemory;
+                // On success `binds[idx-1]` takes ownership of `owned`; on error
+                // remoteSet leaves ownership with us, so free it exactly once.
                 errdefer self.allocator.free(owned);
-                // Reserve capacity in both collections before mutating either, so
-                // no grow can fail after bind_storage has taken ownership of
-                // `owned` (which would double-free it via deinit).
-                try self.binds.ensureTotalCapacity(self.allocator, idx);
-                try self.bind_storage.ensureUnusedCapacity(self.allocator, 1);
-                self.bind_storage.appendAssumeCapacity(owned);
-                self.remoteSetAssumeCapacity(idx, .{ .text = owned });
+                try self.remoteSet(idx, .{ .text = owned });
             },
         }
     }
@@ -121,29 +127,24 @@ pub const Statement = struct {
         switch (self.kind) {
             .local => {
                 const destructor: ?*const anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, c.SQLITE_TRANSIENT))));
-                // Always pass a non-null data pointer: a null pointer makes a
-                // zero-length blob bind as SQL NULL instead of an empty blob.
-                const data: [*]const u8 = if (blob.len == 0) &[_]u8{} else blob.ptr;
-                const rc = c.sqlite3_bind_blob(
+                // Pass a non-NULL pointer for the zero-length case so an empty
+                // blob binds as an empty BLOB rather than SQL NULL (mirrors
+                // bindText).
+                const ptr: [*]const u8 = if (blob.len == 0) &[_]u8{} else blob.ptr;
+                try err.mapRc(c.sqlite3_bind_blob(
                     self.stmt.?,
                     @intCast(idx),
-                    data,
+                    ptr,
                     @intCast(blob.len),
                     destructor,
-                );
-                try err.mapRc(rc);
+                ));
             },
             .remote => {
-                if (idx == 0) return error.Bind;
                 const owned = self.allocator.dupe(u8, blob) catch return error.OutOfMemory;
+                // On success `binds[idx-1]` takes ownership of `owned`; on error
+                // remoteSet leaves ownership with us, so free it exactly once.
                 errdefer self.allocator.free(owned);
-                // Reserve capacity in both collections before mutating either, so
-                // no grow can fail after bind_storage has taken ownership of
-                // `owned` (which would double-free it via deinit).
-                try self.binds.ensureTotalCapacity(self.allocator, idx);
-                try self.bind_storage.ensureUnusedCapacity(self.allocator, 1);
-                self.bind_storage.appendAssumeCapacity(owned);
-                self.remoteSetAssumeCapacity(idx, .{ .blob = owned });
+                try self.remoteSet(idx, .{ .blob = owned });
             },
         }
     }
@@ -158,36 +159,152 @@ pub const Statement = struct {
         }
     }
 
+    // --- named binds ---
+
+    pub fn bindNamedNull(self: *Statement, name: []const u8) err.Error!void {
+        try self.bindNamedValue(name, .{ .null = {} });
+    }
+
+    pub fn bindNamedInt(self: *Statement, name: []const u8, v: i64) err.Error!void {
+        try self.bindNamedValue(name, .{ .integer = v });
+    }
+
+    pub fn bindNamedFloat(self: *Statement, name: []const u8, v: f64) err.Error!void {
+        try self.bindNamedValue(name, .{ .float = v });
+    }
+
+    pub fn bindNamedText(self: *Statement, name: []const u8, text: []const u8) err.Error!void {
+        switch (self.kind) {
+            .local => {
+                const idx = try self.resolveName(name);
+                try self.bindText(@intCast(idx), text);
+            },
+            .remote => {
+                const owned = self.allocator.dupe(u8, text) catch return error.OutOfMemory;
+                // On success remoteNamedSet takes ownership of `owned`; on error
+                // ownership stays with us, so free it exactly once.
+                errdefer self.allocator.free(owned);
+                try self.remoteNamedSet(name, .{ .text = owned });
+            },
+        }
+    }
+
+    pub fn bindNamedBlob(self: *Statement, name: []const u8, blob: []const u8) err.Error!void {
+        switch (self.kind) {
+            .local => {
+                const idx = try self.resolveName(name);
+                try self.bindBlob(@intCast(idx), blob);
+            },
+            .remote => {
+                const owned = self.allocator.dupe(u8, blob) catch return error.OutOfMemory;
+                // On success remoteNamedSet takes ownership of `owned`; on error
+                // ownership stays with us, so free it exactly once.
+                errdefer self.allocator.free(owned);
+                try self.remoteNamedSet(name, .{ .blob = owned });
+            },
+        }
+    }
+
+    pub fn bindNamedValue(self: *Statement, name: []const u8, v: value.Value) err.Error!void {
+        switch (self.kind) {
+            .local => {
+                const idx = try self.resolveName(name);
+                try self.bindValue(@intCast(idx), v);
+            },
+            .remote => switch (v) {
+                .text => |t| try self.bindNamedText(name, t),
+                .blob => |b| try self.bindNamedBlob(name, b),
+                else => try self.remoteNamedSet(name, v),
+            },
+        }
+    }
+
+    /// Resolve a parameter name to a 1-based index (local only).
+    /// Tries `name` as given, then `:name`, `@name`, `$name` if no prefix.
+    pub fn resolveName(self: *Statement, name: []const u8) err.Error!c_int {
+        if (self.kind != .local) return error.Unsupported;
+        var buf: [256]u8 = undefined;
+        if (name.len >= buf.len) return error.Bind;
+
+        // As given
+        {
+            const z = self.allocator.dupeZ(u8, name) catch return error.OutOfMemory;
+            defer self.allocator.free(z);
+            const idx = c.sqlite3_bind_parameter_index(self.stmt.?, z.ptr);
+            if (idx != 0) return idx;
+        }
+
+        // With common prefixes when name has none
+        if (name.len > 0 and name[0] != ':' and name[0] != '@' and name[0] != '$' and name[0] != '?') {
+            const prefixes = [_]u8{ ':', '@', '$' };
+            for (prefixes) |p| {
+                const z = std.fmt.bufPrintZ(&buf, "{c}{s}", .{ p, name }) catch return error.Bind;
+                const idx = c.sqlite3_bind_parameter_index(self.stmt.?, z.ptr);
+                if (idx != 0) return idx;
+            }
+        }
+        return error.Bind;
+    }
+
+    /// Free the heap storage a bind value owns (text/blob); no-op otherwise.
+    fn freeOwnedValue(allocator: std.mem.Allocator, v: value.Value) void {
+        switch (v) {
+            .text => |t| allocator.free(t),
+            .blob => |b| allocator.free(b),
+            else => {},
+        }
+    }
+
     fn remoteSet(self: *Statement, idx: usize, v: value.Value) err.Error!void {
         if (idx == 0) return error.Bind;
         const i = idx - 1;
         while (self.binds.items.len <= i) {
             try self.binds.append(self.allocator, .{ .null = {} });
         }
+        // Replace in place: free the previous owned storage so rebinding an
+        // index does not accumulate stale allocations (local replacement
+        // semantics), then take ownership of the new value.
+        freeOwnedValue(self.allocator, self.binds.items[i]);
         self.binds.items[i] = v;
     }
 
-    /// Like `remoteSet` but assumes `binds` already has capacity for `idx`
-    /// elements (caller must `ensureTotalCapacity(idx)` first), so it cannot
-    /// fail and cannot leave partially-owned storage behind.
-    fn remoteSetAssumeCapacity(self: *Statement, idx: usize, v: value.Value) void {
-        const i = idx - 1;
-        while (self.binds.items.len <= i) self.binds.appendAssumeCapacity(.{ .null = {} });
-        self.binds.items[i] = v;
+    fn remoteNamedSet(self: *Statement, name: []const u8, v: value.Value) err.Error!void {
+        // Update an existing binding for this name in place: free its previous
+        // owned value and reuse the already-owned name. This avoids growing the
+        // list and sending duplicate named values when a statement is reused.
+        for (self.named_binds.items) |*entry| {
+            if (std.mem.eql(u8, entry.name, name)) {
+                freeOwnedValue(self.allocator, entry.value);
+                entry.value = v;
+                return;
+            }
+        }
+        const name_owned = self.allocator.dupe(u8, name) catch return error.OutOfMemory;
+        errdefer self.allocator.free(name_owned);
+        try self.named_binds.append(self.allocator, .{ .name = name_owned, .value = v });
     }
 
+    /// Bind a tuple positionally, or a non-tuple struct by field name.
     pub fn bind(self: *Statement, args: anytype) err.Error!void {
         const Args = @TypeOf(args);
         const info = @typeInfo(Args);
         switch (info) {
             .@"struct" => |s| {
-                // Fail closed: the argument count must match the statement's
-                // parameter count so omitted values are not silently bound NULL.
-                if (s.fields.len != self.parameterCount()) return error.Bind;
-                inline for (s.fields, 0..) |field, i| {
-                    const idx = i + 1;
-                    const field_val = @field(args, field.name);
-                    try bindAny(self, idx, field_val);
+                // Fail closed: for local statements the number of bind values must
+                // match the statement's declared parameter count so omitted values
+                // are not silently left bound to NULL. Remote statements do not
+                // expose a declared parameter count, so this only runs locally.
+                if (self.kind == .local and s.fields.len != try self.parameterCount()) {
+                    return error.Bind;
+                }
+                if (s.is_tuple) {
+                    inline for (s.fields, 0..) |field, i| {
+                        try bindAny(self, i + 1, @field(args, field.name));
+                    }
+                } else {
+                    inline for (s.fields) |field| {
+                        try bindAnyNamed(self, field.name, @field(args, field.name));
+                    }
                 }
             },
             else => @compileError("bind expects a tuple or struct of bind values"),
@@ -241,6 +358,53 @@ pub const Statement = struct {
         }
     }
 
+    fn bindAnyNamed(self: *Statement, name: []const u8, field_val: anytype) err.Error!void {
+        const T = @TypeOf(field_val);
+        if (T == value.Value) {
+            try self.bindNamedValue(name, field_val);
+            return;
+        }
+        if (T == @TypeOf(null)) {
+            try self.bindNamedNull(name);
+            return;
+        }
+        const ti = @typeInfo(T);
+        switch (ti) {
+            .null => try self.bindNamedNull(name),
+            .optional => {
+                if (field_val) |v| {
+                    try bindAnyNamed(self, name, v);
+                } else {
+                    try self.bindNamedNull(name);
+                }
+            },
+            .int, .comptime_int => try self.bindNamedInt(name, @intCast(field_val)),
+            .float, .comptime_float => try self.bindNamedFloat(name, @floatCast(field_val)),
+            .pointer => |ptr| {
+                if (ptr.size == .slice and ptr.child == u8) {
+                    try self.bindNamedText(name, field_val);
+                    return;
+                }
+                if (ptr.size == .one) {
+                    const child = @typeInfo(ptr.child);
+                    if (child == .array and child.array.child == u8) {
+                        try self.bindNamedText(name, field_val.*[0..]);
+                        return;
+                    }
+                }
+                @compileError("unsupported named bind pointer type: " ++ @typeName(T));
+            },
+            .array => |arr| {
+                if (arr.child == u8) {
+                    try self.bindNamedText(name, field_val[0..]);
+                    return;
+                }
+                @compileError("unsupported named bind array type: " ++ @typeName(T));
+            },
+            else => @compileError("unsupported named bind type: " ++ @typeName(T)),
+        }
+    }
+
     pub fn step(self: *Statement) err.Error!?rows.Row {
         if (self.done) return null;
         switch (self.kind) {
@@ -280,7 +444,7 @@ pub const Statement = struct {
 
     pub fn execute(self: *Statement) err.Error!void {
         // sqlite3_step auto-resets a completed statement, so guard against
-        // re-running the same DML on a second execute() call.
+        // re-running the same DML on a second execute() call (idempotent).
         if (self.done) return;
         switch (self.kind) {
             .local => {
@@ -292,7 +456,6 @@ pub const Statement = struct {
                             return;
                         },
                         c.SQLITE_ROW => {
-                            // Drain unexpected rows then error.
                             while (c.sqlite3_step(self.stmt.?) == c.SQLITE_ROW) {}
                             return error.Sql;
                         },
@@ -315,92 +478,51 @@ pub const Statement = struct {
             r.deinit(self.allocator);
             self.result = null;
         }
-        const session = self.session.?;
-        const sql = self.sql.?;
-        const result = try session.execute(sql, self.binds.items, want_rows);
+        const result = try self.session.?.execute(
+            self.sql.?,
+            self.binds.items,
+            self.named_binds.items,
+            want_rows,
+        );
         self.result = result;
         self.row_index = 0;
     }
 
-    pub fn parameterCount(self: *Statement) usize {
+    pub fn parameterCount(self: *Statement) err.Error!usize {
         return switch (self.kind) {
             .local => @intCast(c.sqlite3_bind_parameter_count(self.stmt.?)),
-            // Remote statements have no prepared handle to query, so count the
-            // placeholders in the SQL itself rather than reporting how many slots
-            // happen to be bound.
-            .remote => countSqlParameters(self.sql orelse ""),
+            // Remote statements do not expose the SQL's declared parameter count;
+            // the bind lists only reflect what has been bound so far, which is a
+            // different quantity. Fail closed rather than return a misleading value.
+            .remote => error.Unsupported,
         };
     }
 };
 
-/// Count positional bind parameters (`?` and `?NNN`) in `sql`, mirroring
-/// SQLite's rule that the parameter count is the largest parameter index used.
-/// String/blob literals, quoted identifiers (`"..."`, `` `...` ``, `[...]`), and
-/// `--` / `/* */` comments are skipped. Named parameters (`:x`, `@x`, `$x`) are
-/// not supported by the remote binder and are intentionally not counted.
-fn countSqlParameters(sql: []const u8) usize {
-    var max_index: usize = 0;
-    var i: usize = 0;
-    while (i < sql.len) {
-        switch (sql[i]) {
-            '\'', '"', '`' => {
-                const q = sql[i];
-                i += 1;
-                while (i < sql.len) : (i += 1) {
-                    if (sql[i] == q) {
-                        if (i + 1 < sql.len and sql[i + 1] == q) {
-                            i += 1; // doubled-quote escape
-                        } else break;
-                    }
-                }
-                i += 1;
-            },
-            '[' => {
-                i += 1;
-                while (i < sql.len and sql[i] != ']') i += 1;
-                i += 1;
-            },
-            '-' => {
-                if (i + 1 < sql.len and sql[i + 1] == '-') {
-                    i += 2;
-                    while (i < sql.len and sql[i] != '\n') i += 1;
-                } else i += 1;
-            },
-            '/' => {
-                if (i + 1 < sql.len and sql[i + 1] == '*') {
-                    i += 2;
-                    while (i + 1 < sql.len and !(sql[i] == '*' and sql[i + 1] == '/')) i += 1;
-                    i += 2;
-                } else i += 1;
-            },
-            '?' => {
-                i += 1;
-                if (i < sql.len and std.ascii.isDigit(sql[i])) {
-                    var n: usize = 0;
-                    while (i < sql.len and std.ascii.isDigit(sql[i])) : (i += 1) {
-                        // Saturate on overflow: a pathologically long `?NNN`
-                        // clamps to usize.max instead of wrapping, so the
-                        // bind-count check rejects it (fail closed).
-                        n = n *| 10 +| @as(usize, sql[i] - '0');
-                    }
-                    if (n > max_index) max_index = n;
-                } else {
-                    // Saturate rather than wrap once the count reaches usize.max.
-                    max_index +|= 1;
-                }
-            },
-            else => i += 1,
-        }
-    }
-    return max_index;
-}
+test "remote rebind replaces without leaking or duplicating" {
+    // testing.allocator fails the test on any leak or double-free, so this
+    // exercises the ownership model for reused remote statements directly.
+    const gpa = std.testing.allocator;
+    var stmt = Statement{ .kind = .remote, .allocator = gpa };
+    defer stmt.deinit();
 
-test "countSqlParameters positional forms" {
-    try std.testing.expectEqual(@as(usize, 0), countSqlParameters("select 1"));
-    try std.testing.expectEqual(@as(usize, 1), countSqlParameters("select ?1"));
-    try std.testing.expectEqual(@as(usize, 2), countSqlParameters("select ?, ?"));
-    try std.testing.expectEqual(@as(usize, 3), countSqlParameters("select ?, ?3"));
-    // Placeholders inside literals/comments/identifiers are ignored.
-    try std.testing.expectEqual(@as(usize, 1), countSqlParameters("select '?', \"?\", ? -- ?\n"));
-    try std.testing.expectEqual(@as(usize, 0), countSqlParameters("select 'a?b' /* ? */"));
+    // Rebinding the same positional index must free the prior owned storage and
+    // keep a single entry, not accumulate one allocation per bind.
+    try stmt.bindText(1, "first");
+    try stmt.bindBlob(1, "second-blob");
+    try stmt.bindText(1, "third");
+    try std.testing.expectEqual(@as(usize, 1), stmt.binds.items.len);
+    try std.testing.expectEqualStrings("third", stmt.binds.items[0].text);
+
+    // Rebinding the same name must replace in place (no duplicate NamedArg,
+    // no leaked name/value copies).
+    try stmt.bindNamedText("a", "x");
+    try stmt.bindNamedBlob("a", "y-blob");
+    try stmt.bindNamedInt("a", 7);
+    try std.testing.expectEqual(@as(usize, 1), stmt.named_binds.items.len);
+    try std.testing.expectEqual(@as(i64, 7), stmt.named_binds.items[0].value.integer);
+
+    // A distinct name appends a new binding.
+    try stmt.bindNamedText("b", "z");
+    try std.testing.expectEqual(@as(usize, 2), stmt.named_binds.items.len);
 }

@@ -89,6 +89,11 @@ pub fn isCleartextRemote(url: []const u8) bool {
 /// - `wss://host/...` → `https://host/...`
 /// - `ws://host/...` → `http://host/...`
 /// - `https://` / `http://` left as-is (trailing slash stripped)
+///
+/// A Hrana base URL carries only `scheme://authority[/path]`; the client appends
+/// its own `/v3/pipeline`. Query or fragment components are rejected rather than
+/// silently mangled by the trailing-slash trim. Bare scheme / empty authority is
+/// also rejected.
 pub fn toHttpBase(allocator: std.mem.Allocator, url: []const u8) error{ OutOfMemory, InvalidPath }![]u8 {
     const mapped = blk: {
         if (std.mem.startsWith(u8, url, "libsql://")) {
@@ -117,7 +122,12 @@ pub fn toHttpBase(allocator: std.mem.Allocator, url: []const u8) error{ OutOfMem
     };
     if (authority.len == 0) return error.InvalidPath;
 
-    // Strip trailing slashes for stable join with /v3/pipeline
+    // Fail closed on query/fragment: trimming trailing '/' below would also
+    // corrupt query or fragment data (e.g. `.../?x=/` → `.../?x=`), and such a
+    // URL is not a valid Hrana base anyway.
+    if (std.mem.indexOfAny(u8, mapped, "?#") != null) return error.InvalidPath;
+
+    // Strip trailing path separators for a stable join with /v3/pipeline.
     var end = mapped.len;
     while (end > 0 and mapped[end - 1] == '/') end -= 1;
     if (end == mapped.len) return mapped;
@@ -131,6 +141,12 @@ test "toHttpBase libsql" {
     const u = try toHttpBase(gpa, "libsql://db.turso.io/");
     defer gpa.free(u);
     try std.testing.expectEqualStrings("https://db.turso.io", u);
+}
+
+test "toHttpBase rejects query or fragment" {
+    const gpa = std.testing.allocator;
+    try std.testing.expectError(error.InvalidPath, toHttpBase(gpa, "https://db.turso.io/path?x=/"));
+    try std.testing.expectError(error.InvalidPath, toHttpBase(gpa, "libsql://db.turso.io/#frag"));
 }
 
 test "toHttpBase rejects missing authority" {

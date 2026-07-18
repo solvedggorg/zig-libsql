@@ -3,7 +3,7 @@
 ## One-liner
 
 **zig-libsql** is a pure(as)-Zig libSQL adapter: Zig API, Zig-compiled local
-engine, pure Zig remote (Hrana) next — not a cargo wrapper.
+engine, pure Zig remote (Hrana) — not a cargo wrapper.
 
 ## Status matrix
 
@@ -11,13 +11,13 @@ engine, pure Zig remote (Hrana) next — not a cargo wrapper.
 |------------|--------|-------|
 | Local file DB | **MVP** | Vendored SQLite 3.49.1 amalgamation |
 | In-memory DB | **MVP** | `:memory:` |
-| Prepare / bind / step | **MVP** | Positional binds |
+| Prepare / bind / step | **MVP** | Positional + **named** binds |
 | Transactions | **MVP** | begin / commit / rollback |
+| Batch | **MVP** | Phase 3 — local txn + remote Hrana batch |
 | Remote Hrana HTTP | **MVP** | Phase 2 — JSON `v3/pipeline` |
 | Hrana WebSocket | later | |
-| Named parameters | later | |
-| Embedded replicas | later | Evaluate pure sync vs rusty bridge |
-| libSQL SQL extensions | later | Needs libsql-sqlite3 amalgamation pin |
+| Embedded replicas | design | `docs/embedded-replicas.md` |
+| libSQL SQL extensions | deferred | Stay on stock SQLite until needed (`docs/libsql-engine.md`) |
 | System libsqlite3 backend | non-goal | Debug-only option only if ever added |
 | Rust C FFI default | non-goal | Optional bridge only (Phase 4) |
 
@@ -27,15 +27,13 @@ engine, pure Zig remote (Hrana) next — not a cargo wrapper.
 
 README, AGENTS, ROADMAP, package scaffold.
 
-### Phase 1 — Local adapter (current)
+### Phase 1 — Local adapter ✅
 
 - Vendor amalgamation, Zig `extern` surface, idiomatic API
 - Tests + demo CLI
 - rusty migration sketch
 
-**Exit:** consumers can drop `linkSystemLibrary("sqlite3")` for local stores.
-
-### Phase 2 — Remote (in progress)
+### Phase 2 — Remote ✅
 
 - URI: `libsql://`, `https://`, `http://` (+ `ws`/`wss` mapped to HTTP)
 - Auth token in `OpenOptions.auth_token` (never logged); `OpenOptions.io` required
@@ -43,11 +41,13 @@ README, AGENTS, ROADMAP, package scaffold.
 - Same public `Connection` / `Statement` / `Row` surface (materialized rows)
 - Live smoke test gated on `LIBSQL_URL` / `LIBSQL_AUTH_TOKEN`
 
-### Phase 3 — Completeness
+### Phase 3 — Completeness (current)
 
-- Named params, batch
-- Embedded replica sync design
-- Optional libSQL fork amalgamation for extensions
+- [x] Named parameters (local SQLite + remote `named_args`)
+- [x] `Connection.batch` (local transaction; remote Hrana batch + BEGIN/COMMIT)
+- [x] Embedded replica **design** (`docs/embedded-replicas.md`)
+- [x] Engine pin policy (`docs/libsql-engine.md`) — keep SQLite until fork needed
+- [ ] Replica implementation (follow-on after protocol spike)
 
 ### Phase 4 — Optional Rust interop
 

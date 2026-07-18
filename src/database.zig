@@ -11,6 +11,11 @@ pub const OpenOptions = struct {
     path: []const u8,
     /// Remote auth token (never logged). Required for most remote servers.
     auth_token: ?[]const u8 = null,
+    /// Allow a remote connection over plaintext (`http://` / `ws://`) transport.
+    /// Off by default (fail closed): plaintext exposes SQL and results in
+    /// cleartext. A bearer token is rejected over plaintext even when this is
+    /// set — tokens always require HTTPS. Remote only; ignored for local.
+    allow_insecure: bool = false,
     /// Open read-only (local only).
     read_only: bool = false,
     /// Create file if missing (local only; default true when not read_only).
@@ -37,12 +42,11 @@ pub const Database = struct {
         switch (parsed.kind) {
             .remote => {
                 const io = opts.io orelse return error.Unsupported;
-                // Fail closed: never send a Bearer token over cleartext transport.
-                if (opts.auth_token != null and path_util.isCleartextRemote(opts.path))
-                    return error.InvalidPath;
+                // Fail-closed transport is enforced inside Session.open
+                // (token always requires HTTPS; tokenless plaintext needs allow_insecure).
                 const session_ptr = allocator.create(remote.Session) catch return error.OutOfMemory;
                 errdefer allocator.destroy(session_ptr);
-                session_ptr.* = try remote.Session.open(io, allocator, opts.path, opts.auth_token);
+                session_ptr.* = try remote.Session.open(io, allocator, opts.path, opts.auth_token, opts.allow_insecure);
                 return .{
                     .allocator = allocator,
                     .path = path_owned,

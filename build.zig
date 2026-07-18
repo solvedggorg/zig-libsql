@@ -58,8 +58,25 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
+    // Tests live in `src/tests.zig` so that `src/root.zig` stays limited to
+    // public exports + version. The test module links the amalgamation itself
+    // and imports `root.zig` (public surface) plus submodules for unit tests.
+    // Note: cannot also `addImport("zig_libsql", mod)` here — Zig forbids the
+    // same source file existing in two modules of one compilation.
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("src/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    test_mod.addCSourceFile(.{
+        .file = b.path("vendor/sqlite3.c"),
+        .flags = &sqlite_flags,
+    });
+    test_mod.addIncludePath(b.path("vendor"));
+
     const mod_tests = b.addTest(.{
-        .root_module = mod,
+        .root_module = test_mod,
     });
     const run_mod_tests = b.addRunArtifact(mod_tests);
 

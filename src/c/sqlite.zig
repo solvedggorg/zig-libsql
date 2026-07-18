@@ -107,6 +107,8 @@ pub extern fn sqlite3_bind_int64(stmt: ?*sqlite3_stmt, idx: c_int, value: i64) c
 pub extern fn sqlite3_bind_double(stmt: ?*sqlite3_stmt, idx: c_int, value: f64) c_int;
 pub extern fn sqlite3_bind_null(stmt: ?*sqlite3_stmt, idx: c_int) c_int;
 pub extern fn sqlite3_bind_parameter_count(stmt: ?*sqlite3_stmt) c_int;
+pub extern fn sqlite3_bind_parameter_index(stmt: ?*sqlite3_stmt, zName: [*:0]const u8) c_int;
+pub extern fn sqlite3_bind_parameter_name(stmt: ?*sqlite3_stmt, i: c_int) ?[*:0]const u8;
 pub extern fn sqlite3_step(stmt: ?*sqlite3_stmt) c_int;
 pub extern fn sqlite3_column_count(stmt: ?*sqlite3_stmt) c_int;
 pub extern fn sqlite3_column_name(stmt: ?*sqlite3_stmt, iCol: c_int) ?[*:0]const u8;

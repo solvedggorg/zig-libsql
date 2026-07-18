@@ -101,8 +101,8 @@ pub const Row = struct {
                 const n = c.sqlite3_column_bytes(self.local_stmt.?, @intCast(col));
                 if (n < 0) return error.Sql;
                 // sqlite3_column_blob returns NULL for a zero-length BLOB, which is
-                // a valid (non-NULL) empty blob, so handle it before treating NULL
-                // as error.
+                // a valid (non-NULL) empty blob: handle it before treating NULL as
+                // an error.
                 if (n == 0) break :blk &[_]u8{};
                 // n > 0 with a NULL pointer means SQLite could not materialize the
                 // blob (e.g. OOM during conversion): fail closed.
