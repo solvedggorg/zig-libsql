@@ -205,15 +205,13 @@ pub fn parsePipelineResponse(allocator: std.mem.Allocator, body: []const u8) err
 
     if (std.mem.eql(u8, rtype_s, "error")) {
         outcome.failed = true;
-        if (robj.get("error")) |e| {
-            if (e == .object) {
-                if (e.object.get("message")) |m| {
-                    if (m == .string) {
-                        outcome.error_message = try allocator.dupe(u8, m.string);
-                    }
-                }
-            }
-        }
+        if (robj.get("error")) |e| switch (e) {
+            .object => |eobj| if (eobj.get("message")) |m| switch (m) {
+                .string => |s| outcome.error_message = try allocator.dupe(u8, s),
+                else => {},
+            },
+            else => {},
+        };
         return outcome;
     }
 
