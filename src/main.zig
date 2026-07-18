@@ -57,13 +57,13 @@ pub fn main(init: std.process.Init) !void {
     while (try stmt.step()) |row| {
         const n = row.columnCount();
         if (row_i == 0) {
-        var col: usize = 0;
-        while (col < n) : (col += 1) {
-            if (col > 0) std.debug.print("|", .{});
-            const name = try row.columnName(col);
-            std.debug.print("{s}", .{name});
-        }
-        std.debug.print("\n", .{});
+            var col: usize = 0;
+            while (col < n) : (col += 1) {
+                if (col > 0) std.debug.print("|", .{});
+                const name = try row.columnName(col);
+                std.debug.print("{s}", .{name});
+            }
+            std.debug.print("\n", .{});
         }
         var col: usize = 0;
         while (col < n) : (col += 1) {

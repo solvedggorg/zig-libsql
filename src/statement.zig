@@ -127,10 +127,14 @@ pub const Statement = struct {
         switch (self.kind) {
             .local => {
                 const destructor: ?*const anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, c.SQLITE_TRANSIENT))));
+                // Pass a non-NULL pointer for the zero-length case so an empty
+                // blob binds as an empty BLOB rather than SQL NULL (mirrors
+                // bindText).
+                const ptr: [*]const u8 = if (blob.len == 0) &[_]u8{} else blob.ptr;
                 try err.mapRc(c.sqlite3_bind_blob(
                     self.stmt.?,
                     @intCast(idx),
-                    if (blob.len == 0) null else blob.ptr,
+                    ptr,
                     @intCast(blob.len),
                     destructor,
                 ));
@@ -273,6 +277,13 @@ pub const Statement = struct {
         const info = @typeInfo(Args);
         switch (info) {
             .@"struct" => |s| {
+                // Fail closed: for local statements the number of bind values must
+                // match the statement's declared parameter count so omitted values
+                // are not silently left bound to NULL. Remote statements do not
+                // expose a declared parameter count, so this only runs locally.
+                if (self.kind == .local and s.fields.len != try self.parameterCount()) {
+                    return error.Bind;
+                }
                 if (s.is_tuple) {
                     inline for (s.fields, 0..) |field, i| {
                         try bindAny(self, i + 1, @field(args, field.name));
@@ -419,6 +430,9 @@ pub const Statement = struct {
     }
 
     pub fn execute(self: *Statement) err.Error!void {
+        // sqlite3_step auto-resets a completed statement, so guard against
+        // re-running the same DML on a second execute() call (idempotent).
+        if (self.done) return;
         switch (self.kind) {
             .local => {
                 while (true) {

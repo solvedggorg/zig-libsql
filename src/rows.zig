@@ -70,9 +70,12 @@ pub const Row = struct {
         return switch (self.kind) {
             .local => blk: {
                 if (c.sqlite3_column_type(self.local_stmt.?, @intCast(col)) == c.SQLITE_NULL) break :blk null;
-                const ptr = c.sqlite3_column_text(self.local_stmt.?, @intCast(col)) orelse break :blk null;
+                // A non-NULL column that yields no pointer means SQLite failed to
+                // materialize the value (e.g. OOM during conversion): fail closed
+                // rather than silently downgrading the value to null.
+                const ptr = c.sqlite3_column_text(self.local_stmt.?, @intCast(col)) orelse return error.Sql;
                 const n = c.sqlite3_column_bytes(self.local_stmt.?, @intCast(col));
-                if (n < 0) break :blk null;
+                if (n < 0) return error.Sql;
                 break :blk ptr[0..@intCast(n)];
             },
             .remote => switch (self.remote_cells.?[col]) {
@@ -89,9 +92,14 @@ pub const Row = struct {
             .local => blk: {
                 if (c.sqlite3_column_type(self.local_stmt.?, @intCast(col)) == c.SQLITE_NULL) break :blk null;
                 const n = c.sqlite3_column_bytes(self.local_stmt.?, @intCast(col));
-                if (n < 0) break :blk null;
+                if (n < 0) return error.Sql;
+                // sqlite3_column_blob returns NULL for a zero-length BLOB, which is
+                // a valid (non-NULL) empty blob: handle it before treating NULL as
+                // an error.
                 if (n == 0) break :blk &[_]u8{};
-                const ptr = c.sqlite3_column_blob(self.local_stmt.?, @intCast(col)) orelse break :blk &[_]u8{};
+                // n > 0 with a NULL pointer means SQLite could not materialize the
+                // blob (e.g. OOM during conversion): fail closed.
+                const ptr = c.sqlite3_column_blob(self.local_stmt.?, @intCast(col)) orelse return error.Sql;
                 break :blk ptr[0..@intCast(n)];
             },
             .remote => switch (self.remote_cells.?[col]) {
