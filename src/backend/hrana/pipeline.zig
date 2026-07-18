@@ -172,14 +172,16 @@ pub fn parsePipelineResponse(allocator: std.mem.Allocator, body: []const u8) err
         switch (baton_v) {
             .string => |s| outcome.baton = try allocator.dupe(u8, s),
             .null => {},
-            else => {},
+            // baton is `string | null` per Hrana; anything else is malformed.
+            else => return error.Sql,
         }
     }
     if (root.get("base_url")) |url_v| {
         switch (url_v) {
             .string => |s| outcome.base_url = try allocator.dupe(u8, s),
             .null => {},
-            else => {},
+            // base_url is `string | null` per Hrana; anything else is malformed.
+            else => return error.Sql,
         }
     }
 
@@ -189,7 +191,9 @@ pub fn parsePipelineResponse(allocator: std.mem.Allocator, body: []const u8) err
         else => return error.Sql,
     };
 
-    if (results.items.len == 0) return outcome;
+    // We only ever send single-request pipelines, so a valid reply always echoes
+    // exactly one result. An empty payload is malformed and must not read as ok.
+    if (results.items.len == 0) return error.Sql;
 
     // Process first result (we send single-request pipelines).
     const first = results.items[0];
@@ -266,8 +270,10 @@ fn parseStmtResult(allocator: std.mem.Allocator, v: std.json.Value) err.Error!St
             };
             switch (name_v) {
                 .string => |s| try cols.append(allocator, try allocator.dupe(u8, s)),
+                // `name` may legitimately be null in Hrana; anything non-string
+                // and non-null is a malformed column descriptor.
                 .null => try cols.append(allocator, try allocator.dupe(u8, "")),
-                else => try cols.append(allocator, try allocator.dupe(u8, "")),
+                else => return error.Sql,
             }
         }
     }
@@ -316,10 +322,12 @@ fn parseStmtResult(allocator: std.mem.Allocator, v: std.json.Value) err.Error!St
     var last_id: i64 = 0;
     if (obj.get("last_insert_rowid")) |lid| {
         switch (lid) {
-            .string => |s| last_id = std.fmt.parseInt(i64, s, 10) catch 0,
+            // Hrana sends rowid as a string to preserve i64 precision; reject a
+            // non-numeric string rather than silently coercing it to 0.
+            .string => |s| last_id = std.fmt.parseInt(i64, s, 10) catch return error.Sql,
             .integer => |i| last_id = i,
             .null => {},
-            else => {},
+            else => return error.Sql,
         }
     }
 
@@ -350,4 +358,20 @@ test "parse execute ok response" {
     try std.testing.expect(out.stmt != null);
     try std.testing.expectEqual(@as(usize, 1), out.stmt.?.rows.len);
     try std.testing.expectEqual(@as(i64, 1), out.stmt.?.rows[0][0].integer);
+}
+
+test "reject malformed pipeline responses" {
+    const gpa = std.testing.allocator;
+    // Empty results must not read as a successful (empty) statement.
+    try std.testing.expectError(error.Sql, parsePipelineResponse(gpa,
+        \\{"baton":"abc","base_url":null,"results":[]}
+    ));
+    // Non-string, non-null baton is malformed.
+    try std.testing.expectError(error.Sql, parsePipelineResponse(gpa,
+        \\{"baton":42,"results":[{"type":"ok","response":{"type":"close"}}]}
+    ));
+    // Unparseable last_insert_rowid must fail rather than coerce to 0.
+    try std.testing.expectError(error.Sql, parsePipelineResponse(gpa,
+        \\{"baton":"b","results":[{"type":"ok","response":{"type":"execute","result":{"cols":[],"rows":[],"affected_row_count":0,"last_insert_rowid":"not-a-number"}}}]}
+    ));
 }

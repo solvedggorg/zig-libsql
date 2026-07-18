@@ -63,7 +63,9 @@ pub const Session = struct {
         }
         const body = try pipeline.buildCloseBody(self.allocator, self.baton);
         defer self.allocator.free(body);
-        _ = self.roundTrip(body) catch {};
+        var out = try self.roundTrip(body);
+        defer out.deinit(self.allocator);
+        if (out.failed) return error.Sql;
         self.closed = true;
     }
 

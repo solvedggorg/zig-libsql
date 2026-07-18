@@ -26,26 +26,29 @@ pub fn postPipeline(
         header_count = 2;
     }
 
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    errdefer aw.deinit();
+    // Bound the response body so a large or malicious Hrana reply can't exhaust
+    // memory. Back it with a fixed heap buffer: pages are committed lazily as the
+    // body streams in, and `fixed` returns error.WriteFailed once the cap is hit
+    // (surfaced by fetch and mapped to error.Sql below).
+    const max_response_bytes = 32 * 1024 * 1024; // 32 MiB cap for a v3/pipeline reply
+    const resp_buf = allocator.alloc(u8, max_response_bytes) catch return error.OutOfMemory;
+    defer allocator.free(resp_buf);
+    var resp_writer: std.Io.Writer = .fixed(resp_buf);
 
     const result = client.fetch(.{
         .location = .{ .url = pipeline_url },
         .method = .POST,
         .payload = body,
         .extra_headers = headers_buf[0..header_count],
-        .response_writer = &aw.writer,
+        .response_writer = &resp_writer,
         // Do not follow redirects with POST body blindly.
         .redirect_behavior = .not_allowed,
     }) catch return error.Sql;
 
     const status: u16 = @intFromEnum(result.status);
-    if (status < 200 or status >= 300) {
-        aw.deinit();
-        return error.Sql;
-    }
+    if (status < 200 or status >= 300) return error.Sql;
 
-    return aw.toOwnedSlice() catch return error.OutOfMemory;
+    return allocator.dupe(u8, resp_writer.buffered()) catch return error.OutOfMemory;
 }
 
 /// Join base URL (no trailing slash preferred) with `/v3/pipeline`.

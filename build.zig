@@ -8,10 +8,17 @@ pub fn build(b: *std.Build) void {
         "-std=c99",
         // Thread-safe default (matches multi-threaded Zig consumers).
         "-DSQLITE_THREADSAFE=1",
+        // Compatibility contract: the next two flags change default SQL
+        // semantics for EVERY local database opened through this library, so
+        // consumers relying on stock SQLite defaults must account for them:
+        //   * SQLITE_DEFAULT_FOREIGN_KEYS=1 enforces foreign-key constraints by
+        //     default (upstream SQLite ships them off).
+        //   * SQLITE_DQS=0 disables the double-quoted-string misfeature, so a
+        //     "..." token is always an identifier, never a string literal.
         "-DSQLITE_DEFAULT_FOREIGN_KEYS=1",
         // Embedded: no dynamic extension loading unless we opt in later.
         "-DSQLITE_OMIT_LOAD_EXTENSION",
-        // Quieter / smaller for library use.
+        // Quieter / smaller for library use (see contract note above).
         "-DSQLITE_DQS=0",
     };
 
