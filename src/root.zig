@@ -17,6 +17,15 @@ pub const Connection = @import("connection.zig").Connection;
 pub const Statement = @import("statement.zig").Statement;
 pub const Row = @import("rows.zig").Row;
 
+/// SQLite fundamental datatype codes as returned by `Row.columnType`.
+pub const column_type = struct {
+    pub const integer: c_int = c.SQLITE_INTEGER;
+    pub const float: c_int = c.SQLITE_FLOAT;
+    pub const text: c_int = c.SQLITE_TEXT;
+    pub const blob: c_int = c.SQLITE_BLOB;
+    pub const @"null": c_int = c.SQLITE_NULL;
+};
+
 /// SQLite amalgamation version string from the linked engine.
 pub fn engineVersion() []const u8 {
     return std.mem.span(c.sqlite3_libversion());

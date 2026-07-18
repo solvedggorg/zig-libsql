@@ -41,26 +41,26 @@ pub fn main(init: std.process.Init) !void {
     while (try stmt.step()) |row| {
         const n = row.columnCount();
         if (row_i == 0) {
-            var c: usize = 0;
-            while (c < n) : (c += 1) {
-                if (c > 0) std.debug.print("|", .{});
-                const name = row.columnName(c) catch "?";
-                std.debug.print("{s}", .{name});
-            }
-            std.debug.print("\n", .{});
+        var col: usize = 0;
+        while (col < n) : (col += 1) {
+            if (col > 0) std.debug.print("|", .{});
+            const name = row.columnName(col) catch "?";
+            std.debug.print("{s}", .{name});
         }
-        var c: usize = 0;
-        while (c < n) : (c += 1) {
-            if (c > 0) std.debug.print("|", .{});
-            if (try row.isNull(c)) {
+        std.debug.print("\n", .{});
+        }
+        var col: usize = 0;
+        while (col < n) : (col += 1) {
+            if (col > 0) std.debug.print("|", .{});
+            if (try row.isNull(col)) {
                 std.debug.print("NULL", .{});
             } else {
-                const ty = try row.columnType(c);
+                const ty = try row.columnType(col);
                 switch (ty) {
-                    1 => std.debug.print("{d}", .{try row.int(c)}), // INTEGER
-                    2 => std.debug.print("{d}", .{try row.float(c)}), // FLOAT
+                    libsql.column_type.integer => std.debug.print("{d}", .{try row.int(col)}),
+                    libsql.column_type.float => std.debug.print("{d}", .{try row.float(col)}),
                     else => {
-                        const t = (try row.text(c)) orelse "";
+                        const t = (try row.text(col)) orelse "";
                         std.debug.print("{s}", .{t});
                     },
                 }

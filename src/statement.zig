@@ -120,10 +120,14 @@ pub const Statement = struct {
                 }
                 if (ptr.size == .one) {
                     // *const [N:0]u8 etc.
-                    const child = @typeInfo(ptr.child);
-                    if (child == .array and child.array.child == u8) {
-                        try self.bindText(idx, field_val.*[0..]);
-                        return;
+                    switch (@typeInfo(ptr.child)) {
+                        .array => |a| {
+                            if (a.child == u8) {
+                                try self.bindText(idx, field_val.*[0..]);
+                                return;
+                            }
+                        },
+                        else => {},
                     }
                 }
                 @compileError("unsupported bind pointer type: " ++ @typeName(T));
@@ -150,8 +154,6 @@ pub const Statement = struct {
                 return null;
             },
             else => {
-                // Include SQL error context via db errmsg if needed by callers.
-                _ = err.errmsg(self.db);
                 try err.mapRc(rc);
                 unreachable;
             },
