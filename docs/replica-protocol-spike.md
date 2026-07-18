@@ -146,7 +146,8 @@ padding:             8 bytes
 
 Rules:
 
-- Existing DB **without** wal-index → error (`RequiresCleanDatabase`): delete DB and reopen as replica.  
+- Existing DB **without** wal-index → error (`RequiresCleanDatabase`): the local file may hold user data, so **do not delete it automatically**. Surface the outcome and require an explicit reset/backup decision (back up or discard the file), then reopen as a replica only as an opt-in recovery step.  
+- `committed_frame_no == MAX` is the "uninitialized / no commit" sentinel. Handle it **before** any comparison or offset arithmetic: force `next_offset = 0` (pull from the first frame) and bypass the numeric `committed_frame_no >= primary_index` caught-up check. Do **not** compute `committed_frame_no + 1` on the sentinel (it would overflow). Numeric progression applies only once a real commit value is stored.  
 - Hello `log_id` mismatch → `LogIncompatible`: mark dirty, wipe/resync from scratch.  
 - `set_commit_frame_no` after each successful inject commit (idempotent re-apply of last txn only).
 
@@ -160,7 +161,7 @@ Rules:
 | Local reads | Always from local file |
 | Read-your-writes | After primary write succeeds, replica applies frames so initiator sees data without waiting for another peer’s `sync()` |
 | Offline writes | Optional `offline: true` in some SDKs — local-first; **not** the default classic path |
-| `sync()` | Force handshake + pull until `committed_frame_no >= primary_index` |
+| `sync()` | Force handshake + pull until caught up. On the `MAX` sentinel, start from `next_offset = 0`; otherwise pull until `committed_frame_no >= primary_index` |
 | Periodic sync | Background loop calling oneshot sync on interval |
 
 **zig-libsql v1 decision (locked):** primary-only writes; no offline multi-writer in the first implementation slice.
