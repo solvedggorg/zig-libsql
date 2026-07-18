@@ -1,7 +1,8 @@
-//! Pure Zig classic `ReplicationLog` pull client (R2.1).
+//! Pure Zig classic `ReplicationLog` pull client (R2.1 + R3a).
 //!
-//! Handshake (`Hello`) + `BatchLogEntries` over gRPC-Web. Does **not** inject
-//! frames or expose public `Database.sync` — apply remains R1 bridge / R3.
+//! Handshake (`Hello`) + `BatchLogEntries` + streaming `Snapshot` over gRPC-Web.
+//! Does **not** inject frames or expose public `Database.sync` — apply remains
+//! R1 bridge / R3b inject.
 
 const std = @import("std");
 const Io = std.Io;
@@ -34,6 +35,17 @@ pub const BatchResult = struct {
 
     pub fn pageFrame(self: *const BatchResult, i: usize) error{InvalidFrameLen}!frame_mod.Frame {
         return self.frames[i].parsePageFrame();
+    }
+};
+
+/// Owned page frames from a Snapshot stream (no meta advance).
+pub const SnapshotResult = struct {
+    allocator: std.mem.Allocator,
+    frames: []frame_mod.Frame,
+
+    pub fn deinit(self: *SnapshotResult) void {
+        self.allocator.free(self.frames);
+        self.* = undefined;
     }
 };
 
@@ -106,7 +118,7 @@ pub const Client = struct {
         };
     }
 
-    /// Handshake; stores session token + log_id for subsequent batch pulls.
+    /// Handshake; stores session token + log_id for subsequent batch/snapshot pulls.
     pub fn hello(self: *Client) err.Error!HelloResult {
         const req_pb = wal_log.HelloRequest.default().encode(self.allocator) catch return error.OutOfMemory;
         defer self.allocator.free(req_pb);
@@ -158,6 +170,9 @@ pub const Client = struct {
     }
 
     /// Pull one batch of frames starting at `next_offset` (requires prior `hello`).
+    ///
+    /// Returns `error.NeedSnapshot` when the primary signals that incremental
+    /// log pull is insufficient — call `snapshot` then resume.
     pub fn batchLogEntries(self: *Client, next_offset: u64) err.Error!BatchResult {
         if (self.session_token == null) return error.Sql;
 
@@ -182,7 +197,43 @@ pub const Client = struct {
         };
     }
 
+    /// Full/dense snapshot stream from `next_offset` (requires prior `hello`).
+    ///
+    /// Does **not** write meta or inject frames. Caller applies then advances
+    /// `committed_frame_no`. Body size is capped by the HTTP transport (64 MiB).
+    pub fn snapshot(self: *Client, next_offset: u64) err.Error!SnapshotResult {
+        if (self.session_token == null) return error.Sql;
+
+        const off = wal_log.LogOffset{ .next_offset = next_offset };
+        const req_pb = off.encode(self.allocator) catch return error.OutOfMemory;
+        defer self.allocator.free(req_pb);
+
+        const url = try http.rpcUrl(self.allocator, self.base_url, "Snapshot");
+        defer self.allocator.free(url);
+
+        var stream = try http.postStream(self.io, self.allocator, url, self.headers(), req_pb);
+        defer stream.deinit();
+
+        var list: std.ArrayList(frame_mod.Frame) = .empty;
+        errdefer list.deinit(self.allocator);
+
+        var offset = next_offset;
+        for (stream.messages) |msg| {
+            const rpc = wal_log.RpcFrame.decode(msg) catch return error.Sql;
+            const pf = rpc.parsePageFrame() catch return error.Sql;
+            try appendFrameWithContinuity(&list, self.allocator, pf, &offset);
+        }
+
+        return .{
+            .allocator = self.allocator,
+            .frames = try list.toOwnedSlice(self.allocator),
+        };
+    }
+
     /// Hello + pull batches until empty or caught up vs primary index.
+    ///
+    /// On `NEED_SNAPSHOT` from `BatchLogEntries`, performs one `Snapshot` RPC
+    /// (counts as one batch toward `max_batches`) then resumes incremental pull.
     ///
     /// Does **not** write meta or inject frames. On `log_id` mismatch with
     /// `expected_log_id` (from meta), returns `error.Sql` without wiping files.
@@ -219,27 +270,39 @@ pub const Client = struct {
                 }
             }
 
-            var batch = try self.batchLogEntries(offset);
+            var batch = self.batchLogEntries(offset) catch |e| switch (e) {
+                error.NeedSnapshot => {
+                    // Snapshot counts as this loop iteration's batch budget.
+                    var snap = try self.snapshot(offset);
+                    defer snap.deinit();
+                    if (snap.frames.len == 0) {
+                        // Fail closed: an empty snapshot is only acceptable when
+                        // the replica is provably caught up to the primary.
+                        const caught_up = if (self.current_replication_index) |primary|
+                            (offset == 0 and primary == 0) or
+                                (offset > 0 and offset - 1 >= primary)
+                        else
+                            false;
+                        if (!caught_up) return error.Sql;
+                        break;
+                    }
+                    for (snap.frames) |pf| {
+                        try appendFrameWithContinuity(&list, self.allocator, pf, &offset);
+                    }
+                    if (self.current_replication_index) |primary| {
+                        if (offset > 0 and offset - 1 >= primary) break;
+                    }
+                    continue;
+                },
+                else => return e,
+            };
             defer batch.deinit();
 
             if (batch.frames.len == 0) break;
 
             for (batch.frames) |rpc| {
                 const pf = rpc.parsePageFrame() catch return error.Sql;
-                const frame_no = pf.header.frame_no;
-                // Reject gaps and duplicates: each frame must be exactly the one
-                // we asked for. On a fresh pull (`offset == 0` means "from the
-                // first frame") frame numbers are 1-based, so accept the server's
-                // first frame_no as the baseline instead of requiring it to be 0.
-                if (offset == 0) {
-                    if (frame_no == 0) return error.Sql;
-                } else if (frame_no != offset) {
-                    return error.Sql;
-                }
-                // Guard against a server-provided maxInt(u64) overflowing offset.
-                const next = std.math.add(u64, frame_no, 1) catch return error.Sql;
-                list.append(self.allocator, pf) catch return error.OutOfMemory;
-                offset = next;
+                try appendFrameWithContinuity(&list, self.allocator, pf, &offset);
             }
 
             if (self.current_replication_index) |primary| {
@@ -255,6 +318,28 @@ pub const Client = struct {
         };
     }
 };
+
+/// Append one page frame, enforcing frame_no continuity and advancing `offset`.
+///
+/// On a fresh pull (`offset == 0` means "from the first frame") frame numbers
+/// are 1-based, so accept the server's first frame_no as the baseline.
+fn appendFrameWithContinuity(
+    list: *std.ArrayList(frame_mod.Frame),
+    allocator: std.mem.Allocator,
+    pf: frame_mod.Frame,
+    offset: *u64,
+) err.Error!void {
+    const frame_no = pf.header.frame_no;
+    if (offset.* == 0) {
+        if (frame_no == 0) return error.Sql;
+    } else if (frame_no != offset.*) {
+        return error.Sql;
+    }
+    // Guard against a server-provided maxInt(u64) overflowing offset.
+    const next = std.math.add(u64, frame_no, 1) catch return error.Sql;
+    list.append(allocator, pf) catch return error.OutOfMemory;
+    offset.* = next;
+}
 
 /// Parse a UUID string into little-endian u128 for `WalIndexMeta.log_id`.
 /// Official client stores UUID as u128; we accept standard 8-4-4-4-12 hex form.
@@ -297,4 +382,42 @@ test "client open rejects empty token and plaintext base" {
 
     try std.testing.expectError(error.InvalidPath, Client.open(io, gpa, "libsql://x.example", "", "default"));
     try std.testing.expectError(error.InvalidPath, Client.open(io, gpa, "http://x.example", "tok", "default"));
+}
+
+test "appendFrameWithContinuity continuity" {
+    const gpa = std.testing.allocator;
+    var list: std.ArrayList(frame_mod.Frame) = .empty;
+    defer list.deinit(gpa);
+
+    var page0 = [_]u8{0} ** frame_mod.page_size;
+    var page1 = [_]u8{1} ** frame_mod.page_size;
+    var page2 = [_]u8{2} ** frame_mod.page_size;
+
+    var offset: u64 = 0;
+    const f1 = frame_mod.Frame.fromParts(.{
+        .frame_no = 3,
+        .checksum = 1,
+        .page_no = 1,
+        .size_after = 1,
+    }, &page0);
+    try appendFrameWithContinuity(&list, gpa, f1, &offset);
+    try std.testing.expectEqual(@as(u64, 4), offset);
+
+    const f2 = frame_mod.Frame.fromParts(.{
+        .frame_no = 4,
+        .checksum = 2,
+        .page_no = 2,
+        .size_after = 0,
+    }, &page1);
+    try appendFrameWithContinuity(&list, gpa, f2, &offset);
+    try std.testing.expectEqual(@as(u64, 5), offset);
+    try std.testing.expectEqual(@as(usize, 2), list.items.len);
+
+    const gap = frame_mod.Frame.fromParts(.{
+        .frame_no = 9,
+        .checksum = 3,
+        .page_no = 3,
+        .size_after = 0,
+    }, &page2);
+    try std.testing.expectError(error.Sql, appendFrameWithContinuity(&list, gpa, gap, &offset));
 }

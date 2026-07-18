@@ -12,6 +12,8 @@ pub const Error = error{
     Unsupported,
     /// Invalid path / URI for open.
     InvalidPath,
+    /// Classic replica: primary requires a Snapshot RPC before incremental log pull.
+    NeedSnapshot,
     OutOfMemory,
 };
 
