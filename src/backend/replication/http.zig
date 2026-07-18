@@ -1,7 +1,11 @@
-//! HTTPS unary transport for classic `ReplicationLog` gRPC-Web RPCs.
+//! HTTPS transport for classic `ReplicationLog` gRPC-Web RPCs.
 //!
-//! Mirrors Hrana HTTP policy: never log tokens; fail closed on plaintext when
-//! an auth token is present; bound response body size.
+//! Supports unary (Hello, BatchLogEntries) and server-streaming (Snapshot)
+//! responses. Mirrors Hrana HTTP policy: never log tokens; fail closed on
+//! plaintext when an auth token is present; bound response body size.
+//!
+//! Snapshot responses share the same in-memory body cap as unary (64 MiB).
+//! Huge databases may need a higher cap or disk-backed streaming later.
 
 const std = @import("std");
 const Io = std.Io;
@@ -12,7 +16,8 @@ const grpc_web = @import("grpc_web.zig");
 /// Client identifier sent as `x-libsql-client-version` (not a secret).
 pub const client_version = "zig-libsql-rpc-0.2.0";
 
-const max_response_bytes = 64 * 1024 * 1024; // 64 MiB — batches of ~4 KiB frames
+/// Max response body for unary and stream RPCs (batches / snapshots of ~4 KiB frames).
+const max_response_bytes = 64 * 1024 * 1024; // 64 MiB
 
 pub const RequestHeaders = struct {
     auth_token: []const u8,
@@ -20,6 +25,19 @@ pub const RequestHeaders = struct {
     namespace: []const u8 = "default",
     /// After Hello; omit when null.
     session_token: ?[]const u8 = null,
+};
+
+/// Owned list of stream message payloads from a server-streaming RPC.
+pub const StreamMessages = struct {
+    allocator: std.mem.Allocator,
+    /// Each element is one gRPC data-frame payload (one protobuf stream item).
+    messages: [][]u8,
+
+    pub fn deinit(self: *StreamMessages) void {
+        for (self.messages) |m| self.allocator.free(m);
+        self.allocator.free(self.messages);
+        self.* = undefined;
+    }
 };
 
 /// Join HTTPS origin with `/wal_log.ReplicationLog/{method}`.
@@ -36,17 +54,31 @@ pub fn httpBase(allocator: std.mem.Allocator, url: []const u8) err.Error![]u8 {
     };
 }
 
-/// POST a framed protobuf request; return decoded gRPC-Web message (owned).
-///
-/// On non-zero `grpc-status`, maps known replica session strings when possible
-/// and otherwise returns `error.Sql`. Does not log tokens or payloads.
-pub fn postUnary(
+fn mapGrpcStatus(status_message: []const u8) err.Error {
+    if (grpc_web.messageIsNeedSnapshot(status_message)) return error.NeedSnapshot;
+    if (grpc_web.messageIsNoHello(status_message)) return error.Sql;
+    if (grpc_web.messageIsNamespaceMissing(status_message)) return error.Sql;
+    return error.Sql;
+}
+
+const PostBody = struct {
+    body: []u8,
+    allocator: std.mem.Allocator,
+
+    fn deinit(self: *PostBody) void {
+        self.allocator.free(self.body);
+        self.* = undefined;
+    }
+};
+
+/// Shared HTTPS POST of a framed protobuf request; returns the raw response body.
+fn postRaw(
     io: Io,
     allocator: std.mem.Allocator,
     url: []const u8,
     headers: RequestHeaders,
     protobuf_request: []const u8,
-) err.Error![]u8 {
+) err.Error!PostBody {
     if (!std.mem.startsWith(u8, url, "https://")) {
         // Token is always required for replica RPCs; plaintext is fail-closed.
         return error.InvalidPath;
@@ -108,18 +140,66 @@ pub fn postUnary(
     const status: u16 = @intFromEnum(result.status);
     if (status < 200 or status >= 300) return error.Sql;
 
-    const body = resp_writer.buffered();
-    var dec = grpc_web.decodeResponseAllowStatus(allocator, body) catch return error.Sql;
+    const body = allocator.dupe(u8, resp_writer.buffered()) catch return error.OutOfMemory;
+    return .{ .body = body, .allocator = allocator };
+}
+
+/// POST a framed protobuf request; return decoded unary gRPC-Web message (owned).
+///
+/// On non-zero `grpc-status`, maps `NEED_SNAPSHOT` → `error.NeedSnapshot` and
+/// otherwise returns `error.Sql`. Does not log tokens or payloads.
+pub fn postUnary(
+    io: Io,
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    headers: RequestHeaders,
+    protobuf_request: []const u8,
+) err.Error![]u8 {
+    var raw = try postRaw(io, allocator, url, headers, protobuf_request);
+    defer raw.deinit();
+
+    var dec = grpc_web.decodeResponseAllowStatus(allocator, raw.body) catch return error.Sql;
     defer dec.deinit(allocator);
 
-    if (dec.status != 0) {
-        if (grpc_web.messageIsNeedSnapshot(dec.status_message)) return error.Sql;
-        if (grpc_web.messageIsNoHello(dec.status_message)) return error.Sql;
-        if (grpc_web.messageIsNamespaceMissing(dec.status_message)) return error.Sql;
-        return error.Sql;
-    }
+    if (dec.status != 0) return mapGrpcStatus(dec.status_message);
 
     return allocator.dupe(u8, dec.message) catch return error.OutOfMemory;
+}
+
+/// POST a framed protobuf request; return server-stream messages (one per data frame).
+///
+/// Same auth/TLS policy as `postUnary`. Body size capped at 64 MiB (see module doc).
+pub fn postStream(
+    io: Io,
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    headers: RequestHeaders,
+    protobuf_request: []const u8,
+) err.Error!StreamMessages {
+    var raw = try postRaw(io, allocator, url, headers, protobuf_request);
+    defer raw.deinit();
+
+    var dec = grpc_web.decodeStreamResponseAllowStatus(allocator, raw.body) catch return error.Sql;
+    // On error paths below, free all stream buffers. On success we steal
+    // `messages` and free only the trailer, so disarm before returning OK.
+    errdefer dec.deinit(allocator);
+
+    if (dec.status != 0) {
+        return mapGrpcStatus(dec.status_message);
+    }
+
+    // Steal messages; free trailer ourselves. Clear fields so a later
+    // accidental deinit would not double-free (errdefer is not run on success).
+    const messages = dec.messages;
+    const trailer = dec.trailer;
+    dec.messages = &.{};
+    dec.trailer = "";
+    allocator.free(trailer);
+
+    return .{
+        .allocator = allocator,
+        .messages = messages,
+    };
 }
 
 test "rpc url join" {

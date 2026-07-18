@@ -16,7 +16,7 @@ engine, pure Zig remote (Hrana) — not a cargo wrapper.
 | Batch | **MVP** | Phase 3 — local txn + remote Hrana batch |
 | Remote Hrana HTTP | **MVP** | Phase 2 — JSON `v3/pipeline` |
 | Hrana WebSocket | later | |
-| Embedded replicas | design + spike + R1 + R2.1 pull | Protocol + pure Zig gRPC-Web pull (no inject); rusty sync gated (`docs/rust-bridge.md`) |
+| Embedded replicas | design + spike + R1 + R2.1 + R3a | Protocol + pure Zig pull/Snapshot (no inject); rusty sync gated (`docs/rust-bridge.md`) |
 | libSQL SQL extensions | deferred | Stay on stock SQLite until needed (`docs/libsql-engine.md`) |
 | System libsqlite3 backend | non-goal | Debug-only option only if ever added |
 | Rust C FFI default | non-goal | Optional bridge only (Phase 4) |
@@ -58,7 +58,9 @@ README, AGENTS, ROADMAP, package scaffold.
   3. **R2.1 ✅:** gRPC-Web unary pull — framing + HTTPS `Hello` /
      `BatchLogEntries` + meta load/save (`docs/replica-wire-r2.md`);
      **no** public pure `Database.sync` / inject
-  4. **R3 (later):** Snapshot stream + libsql engine pin + inject → pure sync
+  4. **R3a ✅:** streaming `Snapshot` + `error.NeedSnapshot` recovery in
+     `pullUntilCaughtUp` (still no inject / public pure sync)
+  5. **R3b (next):** libsql engine pin + WAL inject → pure `Database.sync`
 
 ### Phase 4 — Optional Rust interop
 
