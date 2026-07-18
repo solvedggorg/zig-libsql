@@ -48,8 +48,9 @@ fn platformLibName() []const u8 {
 
 fn ensureLoaded() err.Error!void {
     if (!enabled) return error.Unsupported;
-    if (sync_once_fn != null) return;
 
+    // All reads/writes of sync_once_fn are synchronized under lib_mutex; there is
+    // no unlocked fast path, so concurrent first use cannot race initialization.
     lib_mutex.lock();
     defer lib_mutex.unlock();
     if (sync_once_fn != null) return;
