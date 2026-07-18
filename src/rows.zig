@@ -44,7 +44,14 @@ pub const Row = struct {
             .local => c.sqlite3_column_int64(self.local_stmt.?, @intCast(col)),
             .remote => switch (self.remote_cells.?[col]) {
                 .integer => |i| i,
-                .float => |f| @intFromFloat(f),
+                .float => |f| blk: {
+                    // @intFromFloat is illegal behavior for non-finite or
+                    // out-of-range inputs; fail closed instead of trapping.
+                    const min_f: f64 = @floatFromInt(std.math.minInt(i64));
+                    const max_f: f64 = @floatFromInt(std.math.maxInt(i64));
+                    if (!std.math.isFinite(f) or f < min_f or f >= max_f) return error.Sql;
+                    break :blk @intFromFloat(f);
+                },
                 .null => 0,
                 else => return error.Sql,
             },
@@ -118,12 +125,11 @@ pub const Row = struct {
                 break :blk std.mem.span(name);
             },
             .remote => {
-                if (self.remote_col_names) |names| {
-                    if (col < names.len) return names[col];
-                }
-                // Fail closed: a missing column name is an error, not an empty
-                // string masquerading as a valid (unnamed) column.
-                return error.Sql;
+                // Fail closed: absent metadata or a col/name length mismatch is a
+                // malformed result, not an empty name.
+                const names = self.remote_col_names orelse return error.Sql;
+                if (col >= names.len) return error.Sql;
+                return names[col];
             },
         };
     }
@@ -132,3 +138,21 @@ pub const Row = struct {
         if (col >= self.columnCount()) return error.Bind;
     }
 };
+
+test "remote int rejects out-of-range float" {
+    const cells = [_]value_json.Owned{.{ .float = 1e300 }};
+    const row = Row{ .kind = .remote, .remote_cells = &cells };
+    try std.testing.expectError(error.Sql, row.int(0));
+}
+
+test "remote int accepts in-range float" {
+    const cells = [_]value_json.Owned{.{ .float = 42.0 }};
+    const row = Row{ .kind = .remote, .remote_cells = &cells };
+    try std.testing.expectEqual(@as(i64, 42), try row.int(0));
+}
+
+test "remote columnName fails closed without metadata" {
+    const cells = [_]value_json.Owned{.{ .integer = 1 }};
+    const row = Row{ .kind = .remote, .remote_cells = &cells };
+    try std.testing.expectError(error.Sql, row.columnName(0));
+}

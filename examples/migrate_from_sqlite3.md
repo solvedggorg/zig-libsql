@@ -53,7 +53,11 @@ try stmt.execute();
 
 ## Security still on the consumer
 
-- `chmod 0600` on the auth DB file after open (library does not chmod by default).
+- Restrict permissions *before* opening a new auth DB: set a tight `umask`
+  (e.g. `0o077`) or pre-create the file `0600`, then verify the resulting mode
+  after `Database.open`. Don't rely solely on a post-open `chmod` — that leaves
+  a window where the freshly created DB is readable under the process umask. The
+  library does not chmod consumer-owned files by default.
 - Prefer `PRAGMA journal_mode=DELETE` for token stores (no WAL sidecars).
 - Never log tokens.
 

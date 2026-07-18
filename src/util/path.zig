@@ -75,6 +75,14 @@ test "parse remote" {
     try std.testing.expect(p.kind == .remote);
 }
 
+/// True when a remote open URL uses a cleartext transport (`http://` or `ws://`)
+/// that would expose an auth token in transit. `https://`, `libsql://`, and
+/// `wss://` all map to TLS and are considered secure.
+pub fn isCleartextRemote(url: []const u8) bool {
+    return std.mem.startsWith(u8, url, "http://") or
+        std.mem.startsWith(u8, url, "ws://");
+}
+
 /// Map a remote open URL to an HTTP(S) origin for Hrana over HTTP.
 ///
 /// - `libsql://host/...` → `https://host/...`
@@ -83,9 +91,10 @@ test "parse remote" {
 /// - `https://` / `http://` left as-is (trailing slash stripped)
 ///
 /// A Hrana base URL carries only `scheme://authority[/path]`; the client appends
-/// its own `/v3/pipeline`. Query or fragment components are rejected (`InvalidUrl`)
-/// rather than silently mangled by the trailing-slash trim.
-pub fn toHttpBase(allocator: std.mem.Allocator, url: []const u8) error{ OutOfMemory, InvalidUrl }![]u8 {
+/// its own `/v3/pipeline`. Query or fragment components are rejected rather than
+/// silently mangled by the trailing-slash trim. Bare scheme / empty authority is
+/// also rejected.
+pub fn toHttpBase(allocator: std.mem.Allocator, url: []const u8) error{ OutOfMemory, InvalidPath }![]u8 {
     const mapped = blk: {
         if (std.mem.startsWith(u8, url, "libsql://")) {
             break :blk try std.fmt.allocPrint(allocator, "https://{s}", .{url["libsql://".len..]});
@@ -100,10 +109,23 @@ pub fn toHttpBase(allocator: std.mem.Allocator, url: []const u8) error{ OutOfMem
     };
     errdefer allocator.free(mapped);
 
+    // Fail closed on remote URLs without a valid authority: inputs such as
+    // `https://` or `libsql://` map to a bare scheme with no host, which would
+    // otherwise be accepted and only fail later on a doomed HTTP request. The
+    // host is the run between `://` and the first `/`, `?`, or `#`.
+    const authority = blk2: {
+        const sep = "://";
+        const idx = std.mem.indexOf(u8, mapped, sep) orelse break :blk2 "";
+        const after = mapped[idx + sep.len ..];
+        const host_end = std.mem.indexOfAny(u8, after, "/?#") orelse after.len;
+        break :blk2 after[0..host_end];
+    };
+    if (authority.len == 0) return error.InvalidPath;
+
     // Fail closed on query/fragment: trimming trailing '/' below would also
     // corrupt query or fragment data (e.g. `.../?x=/` → `.../?x=`), and such a
     // URL is not a valid Hrana base anyway.
-    if (std.mem.indexOfAny(u8, mapped, "?#") != null) return error.InvalidUrl;
+    if (std.mem.indexOfAny(u8, mapped, "?#") != null) return error.InvalidPath;
 
     // Strip trailing path separators for a stable join with /v3/pipeline.
     var end = mapped.len;
@@ -123,6 +145,14 @@ test "toHttpBase libsql" {
 
 test "toHttpBase rejects query or fragment" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.InvalidUrl, toHttpBase(gpa, "https://db.turso.io/path?x=/"));
-    try std.testing.expectError(error.InvalidUrl, toHttpBase(gpa, "libsql://db.turso.io/#frag"));
+    try std.testing.expectError(error.InvalidPath, toHttpBase(gpa, "https://db.turso.io/path?x=/"));
+    try std.testing.expectError(error.InvalidPath, toHttpBase(gpa, "libsql://db.turso.io/#frag"));
+}
+
+test "toHttpBase rejects missing authority" {
+    const gpa = std.testing.allocator;
+    try std.testing.expectError(error.InvalidPath, toHttpBase(gpa, "https://"));
+    try std.testing.expectError(error.InvalidPath, toHttpBase(gpa, "libsql://"));
+    try std.testing.expectError(error.InvalidPath, toHttpBase(gpa, "ws://"));
+    try std.testing.expectError(error.InvalidPath, toHttpBase(gpa, "https:///only/path"));
 }

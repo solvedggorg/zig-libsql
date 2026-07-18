@@ -42,6 +42,8 @@ pub const Database = struct {
         switch (parsed.kind) {
             .remote => {
                 const io = opts.io orelse return error.Unsupported;
+                // Fail-closed transport is enforced inside Session.open
+                // (token always requires HTTPS; tokenless plaintext needs allow_insecure).
                 const session_ptr = allocator.create(remote.Session) catch return error.OutOfMemory;
                 errdefer allocator.destroy(session_ptr);
                 session_ptr.* = try remote.Session.open(io, allocator, opts.path, opts.auth_token, opts.allow_insecure);
