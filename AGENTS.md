@@ -72,6 +72,7 @@ Version strings (`build.zig.zon`, `src/root.zig`) must stay in sync.
 | `src/util/path.zig` | Path / URI parsing |
 | `src/backend/remote.zig` | Hrana HTTP session (Phase 2) |
 | `src/backend/bridge.zig` | Optional DynLib loader for rusty replica sync (Phase 4) |
+| `src/backend/replication/` | Pure Zig classic replica wire codecs (R2; not public sync) |
 | `src/backend/hrana/` | Pipeline JSON + HTTP transport |
 | `bridge/` | rusty `libsql_bridge` cdylib (gated; not default) |
 | `docs/rust-bridge.md` | Bridge enable + removal criteria |

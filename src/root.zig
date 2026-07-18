@@ -5,6 +5,7 @@
 //! Named params + batch: Phase 3 — see docs/ROADMAP.md.
 //! Optional rusty bridge for classic embedded replica sync (Phase 4 / R1):
 //! `-Denable-rust-bridge=true` — see docs/rust-bridge.md.
+//! Pure Zig replica wire codecs (R2): `src/backend/replication/` (not public sync yet).
 
 const std = @import("std");
 const c = @import("c/sqlite.zig");
