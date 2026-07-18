@@ -13,7 +13,7 @@ engine, pure Zig remote (Hrana) next — not a cargo wrapper.
 | In-memory DB | **MVP** | `:memory:` |
 | Prepare / bind / step | **MVP** | Positional binds |
 | Transactions | **MVP** | begin / commit / rollback |
-| Remote Hrana HTTP | planned | Phase 2 |
+| Remote Hrana HTTP | **MVP** | Phase 2 — JSON `v3/pipeline` |
 | Hrana WebSocket | later | |
 | Named parameters | later | |
 | Embedded replicas | later | Evaluate pure sync vs rusty bridge |
@@ -35,12 +35,13 @@ README, AGENTS, ROADMAP, package scaffold.
 
 **Exit:** consumers can drop `linkSystemLibrary("sqlite3")` for local stores.
 
-### Phase 2 — Remote
+### Phase 2 — Remote (in progress)
 
-- URI: `libsql://`, `https://`
-- Auth token in options (never logged)
-- Hrana over HTTP (JSON)
-- Same public `Connection` / `Statement` / row surface
+- URI: `libsql://`, `https://`, `http://` (+ `ws`/`wss` mapped to HTTP)
+- Auth token in `OpenOptions.auth_token` (never logged); `OpenOptions.io` required
+- Hrana over HTTP JSON (`POST …/v3/pipeline`) with baton stream state
+- Same public `Connection` / `Statement` / `Row` surface (materialized rows)
+- Live smoke test gated on `LIBSQL_URL` / `LIBSQL_AUTH_TOKEN`
 
 ### Phase 3 — Completeness
 

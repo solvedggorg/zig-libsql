@@ -2,71 +2,80 @@ const std = @import("std");
 const c = @import("c/sqlite.zig");
 const err = @import("error.zig");
 const Statement = @import("statement.zig").Statement;
+const remote = @import("backend/remote.zig");
 
-/// SQL session over a local (or later remote) database handle.
-/// Does not own the underlying handle when obtained via `Database.connect`.
+/// SQL session over a local or remote database handle.
+/// Does not own the underlying handle when obtained via `Database.connect`
+/// (unless `owns_db` is true for the local convenience opener).
 pub const Connection = struct {
-    db: *c.sqlite3,
     allocator: std.mem.Allocator,
-    /// When true, `deinit` closes the handle (standalone open helper).
+    kind: enum { local, remote },
+    // local
+    db: ?*c.sqlite3 = null,
     owns_db: bool = false,
+    // remote (pointer into Database-owned Session)
+    session: ?*remote.Session = null,
 
     pub fn deinit(self: *Connection) void {
-        if (self.owns_db) {
-            _ = c.sqlite3_close_v2(self.db);
+        if (self.kind == .local and self.owns_db) {
+            _ = c.sqlite3_close_v2(self.db.?);
         }
         self.* = undefined;
     }
 
     /// Execute one or more SQL statements with no result rows expected.
-    /// `args` is currently unused (reserved for future expansion); pass `{}`.
+    /// `args` is reserved; pass `{}`.
     pub fn exec(self: *Connection, sql: []const u8, args: anytype) err.Error!void {
         _ = args;
-        const zsql = self.allocator.dupeZ(u8, sql) catch return error.OutOfMemory;
-        defer self.allocator.free(zsql);
+        switch (self.kind) {
+            .local => {
+                const zsql = self.allocator.dupeZ(u8, sql) catch return error.OutOfMemory;
+                defer self.allocator.free(zsql);
 
-        var errmsg_c: ?[*:0]u8 = null;
-        const rc = c.sqlite3_exec(self.db, zsql.ptr, null, null, &errmsg_c);
-        if (rc != c.SQLITE_OK) {
-            if (errmsg_c) |e| {
-                // Intentionally not logging content (may contain user data).
-                c.sqlite3_free(e);
-            }
-            if (rc == c.SQLITE_NOMEM) return error.OutOfMemory;
-            return error.Sql;
+                var errmsg_c: ?[*:0]u8 = null;
+                const rc = c.sqlite3_exec(self.db.?, zsql.ptr, null, null, &errmsg_c);
+                if (rc != c.SQLITE_OK) {
+                    if (errmsg_c) |e| c.sqlite3_free(e);
+                    if (rc == c.SQLITE_NOMEM) return error.OutOfMemory;
+                    return error.Sql;
+                }
+            },
+            .remote => try self.session.?.sequence(sql),
         }
     }
 
     pub fn prepare(self: *Connection, sql: []const u8) err.Error!Statement {
-        var stmt: ?*c.sqlite3_stmt = null;
-        var tail: ?[*]const u8 = null;
-        const rc = c.sqlite3_prepare_v2(
-            self.db,
-            sql.ptr,
-            @intCast(sql.len),
-            &stmt,
-            &tail,
-        );
-        if (rc != c.SQLITE_OK or stmt == null) {
-            if (stmt) |s| _ = c.sqlite3_finalize(s);
-            if (rc == c.SQLITE_NOMEM) return error.OutOfMemory;
-            return error.Sql;
+        switch (self.kind) {
+            .local => {
+                var stmt: ?*c.sqlite3_stmt = null;
+                const rc = c.sqlite3_prepare_v2(
+                    self.db.?,
+                    sql.ptr,
+                    @intCast(sql.len),
+                    &stmt,
+                    null,
+                );
+                if (rc != c.SQLITE_OK or stmt == null) {
+                    if (rc == c.SQLITE_NOMEM) return error.OutOfMemory;
+                    return error.Sql;
+                }
+                return .{
+                    .kind = .local,
+                    .allocator = self.allocator,
+                    .db = self.db,
+                    .stmt = stmt.?,
+                };
+            },
+            .remote => {
+                const sql_owned = self.allocator.dupe(u8, sql) catch return error.OutOfMemory;
+                return .{
+                    .kind = .remote,
+                    .allocator = self.allocator,
+                    .session = self.session,
+                    .sql = sql_owned,
+                };
+            },
         }
-        // Fail closed on multi-statement input: prepare only compiles the first
-        // statement, so a non-empty tail would silently drop the rest. Callers
-        // that need to run scripts should use `exec`.
-        if (tail) |t| {
-            const consumed = @intFromPtr(t) - @intFromPtr(sql.ptr);
-            const rest = std.mem.trim(u8, sql[consumed..], " \t\r\n;");
-            if (rest.len != 0) {
-                _ = c.sqlite3_finalize(stmt.?);
-                return error.Sql;
-            }
-        }
-        return .{
-            .db = self.db,
-            .stmt = stmt.?,
-        };
     }
 
     /// Prepare, optional bind tuple, execute to completion, finalize.
@@ -93,10 +102,16 @@ pub const Connection = struct {
     }
 
     pub fn changes(self: *Connection) i64 {
-        return c.sqlite3_changes(self.db);
+        return switch (self.kind) {
+            .local => c.sqlite3_changes(self.db.?),
+            .remote => self.session.?.last_affected,
+        };
     }
 
     pub fn lastInsertRowid(self: *Connection) i64 {
-        return c.sqlite3_last_insert_rowid(self.db);
+        return switch (self.kind) {
+            .local => c.sqlite3_last_insert_rowid(self.db.?),
+            .remote => self.session.?.last_insert_rowid,
+        };
     }
 };
