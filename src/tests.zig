@@ -6,6 +6,8 @@
 
 const std = @import("std");
 
+// Exercise the public package surface (root re-exports + version) via the
+// same compilation unit as the submodule unit tests.
 const libsql = @import("root.zig");
 const Database = libsql.Database;
 const Value = libsql.Value;

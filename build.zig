@@ -60,7 +60,9 @@ pub fn build(b: *std.Build) void {
 
     // Tests live in `src/tests.zig` so that `src/root.zig` stays limited to
     // public exports + version. The test module links the amalgamation itself
-    // (it imports the submodules directly, not through the public module).
+    // and imports `root.zig` (public surface) plus submodules for unit tests.
+    // Note: cannot also `addImport("zig_libsql", mod)` here — Zig forbids the
+    // same source file existing in two modules of one compilation.
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
