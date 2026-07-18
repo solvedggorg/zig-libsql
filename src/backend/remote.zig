@@ -31,6 +31,13 @@ pub const Session = struct {
         const http_base = path_util.toHttpBase(allocator, url) catch return error.InvalidPath;
         errdefer allocator.free(http_base);
 
+        // Fail closed: never transmit a bearer token over a plaintext (non-TLS)
+        // origin. `http://` / `ws://` endpoints would leak the token in cleartext,
+        // so reject a token unless the resolved base URL is HTTPS.
+        if (auth_token != null and !std.mem.startsWith(u8, http_base, "https://")) {
+            return error.InvalidPath;
+        }
+
         var token_owned: ?[]u8 = null;
         errdefer if (token_owned) |t| allocator.free(t);
         if (auth_token) |t| {
@@ -166,4 +173,19 @@ test "session open maps libsql url" {
     var s = try Session.open(io, gpa, "libsql://db.example.com", "tok");
     defer s.deinit();
     try std.testing.expectEqualStrings("https://db.example.com", s.base_url);
+}
+
+test "session rejects token over plaintext http" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try std.testing.expectError(error.InvalidPath, Session.open(io, gpa, "http://db.example.com", "tok"));
+    try std.testing.expectError(error.InvalidPath, Session.open(io, gpa, "ws://db.example.com", "tok"));
+}
+
+test "session allows plaintext http without token" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var s = try Session.open(io, gpa, "http://db.example.com", null);
+    defer s.deinit();
+    try std.testing.expectEqualStrings("http://db.example.com", s.base_url);
 }

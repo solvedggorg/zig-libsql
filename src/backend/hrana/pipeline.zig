@@ -136,7 +136,14 @@ fn writeBatchBody(
     } else {
         try w.writeAll("null");
     }
-    // steps: [BEGIN, ...user, COMMIT] — user step i is Hrana index i+1
+    // Batch step layout (0-based Hrana indices):
+    //   0             : BEGIN
+    //   1 .. steps.len: user steps (user step i → index i+1, conditioned on ok(i))
+    //   steps.len + 1 : COMMIT   (conditioned on ok of the last user step)
+    //   steps.len + 2 : ROLLBACK (runs when BEGIN opened a transaction that did not
+    //                   COMMIT, so a failed user step still closes the explicit
+    //                   transaction on the baton instead of leaking it to the next
+    //                   request on the same stream)
     try w.writeAll(",\"requests\":[{\"type\":\"batch\",\"batch\":{\"steps\":[");
     // BEGIN
     try w.writeAll("{\"stmt\":");
@@ -149,11 +156,19 @@ fn writeBatchBody(
         try writeStmt(w, step.sql, step.args, step.named_args, step.want_rows);
         try w.writeAll("}");
     }
-    // COMMIT conditioned on last user step
-    const commit_cond_step: usize = steps.len; // index of last user step in 0-based batch (after BEGIN is index steps.len)
-    try w.print(",{{\"condition\":{{\"type\":\"ok\",\"step\":{d}}},\"stmt\":", .{commit_cond_step});
+    // COMMIT conditioned on the last user step (index steps.len) being ok.
+    try w.print(",{{\"condition\":{{\"type\":\"ok\",\"step\":{d}}},\"stmt\":", .{steps.len});
     try writeStmt(w, "COMMIT", &.{}, &.{}, false);
-    try w.writeAll("}]}]}}");
+    try w.writeAll("}");
+    // ROLLBACK when BEGIN succeeded (transaction open) but COMMIT did not run or
+    // did not succeed: and(ok(BEGIN), not(ok(COMMIT))).
+    const commit_index: usize = steps.len + 1;
+    try w.print(
+        ",{{\"condition\":{{\"type\":\"and\",\"conds\":[{{\"type\":\"ok\",\"step\":0}},{{\"type\":\"not\",\"cond\":{{\"type\":\"ok\",\"step\":{d}}}}}]}},\"stmt\":",
+        .{commit_index},
+    );
+    try writeStmt(w, "ROLLBACK", &.{}, &.{}, false);
+    try w.writeAll("}]}}]}");
 }
 
 /// Build a pipeline body with a single `sequence` request (multi-statement, no rows).
@@ -244,14 +259,14 @@ pub fn parsePipelineResponse(allocator: std.mem.Allocator, body: []const u8) err
         switch (baton_v) {
             .string => |s| outcome.baton = try allocator.dupe(u8, s),
             .null => {},
-            else => {},
+            else => return error.Sql,
         }
     }
     if (root.get("base_url")) |url_v| {
         switch (url_v) {
             .string => |s| outcome.base_url = try allocator.dupe(u8, s),
             .null => {},
-            else => {},
+            else => return error.Sql,
         }
     }
 
@@ -261,7 +276,9 @@ pub fn parsePipelineResponse(allocator: std.mem.Allocator, body: []const u8) err
         else => return error.Sql,
     };
 
-    if (results.items.len == 0) return outcome;
+    // We always send exactly one request, so an empty results array is a
+    // protocol violation rather than a benign no-op.
+    if (results.items.len == 0) return error.Sql;
 
     // Process first result (we send single-request pipelines).
     const first = results.items[0];
@@ -305,13 +322,13 @@ pub fn parsePipelineResponse(allocator: std.mem.Allocator, body: []const u8) err
         const result = resp_obj.get("result") orelse return error.Sql;
         outcome.stmt = try parseStmtResult(allocator, result);
     } else if (std.mem.eql(u8, resp_type_s, "batch")) {
-        if (resp_obj.get("result")) |br| {
-            try parseBatchResult(allocator, br, &outcome);
-        }
+        const br = resp_obj.get("result") orelse return error.Sql;
+        try parseBatchResult(allocator, br, &outcome);
     } else if (std.mem.eql(u8, resp_type_s, "sequence") or std.mem.eql(u8, resp_type_s, "close")) {
         // no rows
     } else {
-        // Other response types: ignore body for now
+        // Unknown response type for a request we sent is a protocol violation.
+        return error.Sql;
     }
 
     return outcome;
@@ -322,34 +339,41 @@ fn parseBatchResult(allocator: std.mem.Allocator, v: std.json.Value, outcome: *P
         .object => |o| o,
         else => return error.Sql,
     };
-    // step_results is an array (JSON) of StmtResult | null
-    if (obj.get("step_results")) |sr| {
+    // step_results is an array (JSON) of StmtResult | null, one entry per batch
+    // step. Our batch layout is [BEGIN, user steps..., COMMIT, ROLLBACK], so only
+    // the interior indices are user steps; the transaction wrappers are excluded
+    // from steps_run and the affected-row total.
+    const sr = obj.get("step_results") orelse return error.Sql;
+    {
         const arr = switch (sr) {
             .array => |a| a,
-            else => return,
+            else => return error.Sql,
         };
-        for (arr.items) |item| {
+        const user_start: usize = 1;
+        const user_end: usize = if (arr.items.len >= 3) arr.items.len - 2 else user_start;
+        for (arr.items, 0..) |item, i| {
+            const is_user = i >= user_start and i < user_end;
             switch (item) {
                 .null => {},
-                .object => {
-                    outcome.batch_steps_run += 1;
-                    // best-effort affected count
-                    if (item.object.get("affected_row_count")) |a| {
-                        switch (a) {
+                .object => |o| {
+                    if (is_user) {
+                        outcome.batch_steps_run += 1;
+                        if (o.get("affected_row_count")) |a| switch (a) {
                             .integer => |n| outcome.batch_affected += @intCast(@max(n, 0)),
-                            else => {},
-                        }
+                            else => return error.Sql,
+                        };
                     }
                 },
-                else => {},
+                else => return error.Sql,
             }
         }
     }
     // step_errors: if any non-null, mark failed
-    if (obj.get("step_errors")) |se| {
+    const se = obj.get("step_errors") orelse return error.Sql;
+    {
         const arr = switch (se) {
             .array => |a| a,
-            else => return,
+            else => return error.Sql,
         };
         for (arr.items) |item| {
             if (item != .null) {
@@ -436,17 +460,17 @@ fn parseStmtResult(allocator: std.mem.Allocator, v: std.json.Value) err.Error!St
     if (obj.get("affected_row_count")) |a| {
         affected = switch (a) {
             .integer => |i| @intCast(@max(i, 0)),
-            else => 0,
+            else => return error.Sql,
         };
     }
 
     var last_id: i64 = 0;
     if (obj.get("last_insert_rowid")) |lid| {
         switch (lid) {
-            .string => |s| last_id = std.fmt.parseInt(i64, s, 10) catch 0,
+            .string => |s| last_id = std.fmt.parseInt(i64, s, 10) catch return error.Sql,
             .integer => |i| last_id = i,
             .null => {},
-            else => {},
+            else => return error.Sql,
         }
     }
 
@@ -475,16 +499,47 @@ test "build execute body named args" {
     try std.testing.expect(std.mem.indexOf(u8, body, ":id") != null);
 }
 
-test "build batch body wraps begin commit" {
+test "build batch body wraps begin commit rollback" {
     const gpa = std.testing.allocator;
     const steps = [_]batch_mod.Step{
         .{ .sql = "insert into t values (1)" },
+        .{ .sql = "insert into t values (2)" },
     };
     const body = try buildBatchBody(gpa, null, &steps);
     defer gpa.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "BEGIN") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "COMMIT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "ROLLBACK") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"batch\"") != null);
+    // ROLLBACK closes the transaction when COMMIT (step steps.len+1 = 3) did not run.
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"not\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"step\":3") != null);
+
+    // The generated body must be well-formed JSON.
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+}
+
+test "parse batch result counts only user steps" {
+    const gpa = std.testing.allocator;
+    // Layout: [BEGIN, user1, user2, COMMIT, ROLLBACK(skipped)].
+    const body =
+        \\{"baton":"b","base_url":null,"results":[{"type":"ok","response":{"type":"batch","result":{"step_results":[{"cols":[],"rows":[],"affected_row_count":0,"last_insert_rowid":null},{"cols":[],"rows":[],"affected_row_count":1,"last_insert_rowid":10},{"cols":[],"rows":[],"affected_row_count":1,"last_insert_rowid":11},{"cols":[],"rows":[],"affected_row_count":0,"last_insert_rowid":null},null],"step_errors":[null,null,null,null,null]}}}]}
+    ;
+    var out = try parsePipelineResponse(gpa, body);
+    defer out.deinit(gpa);
+    try std.testing.expect(!out.failed);
+    try std.testing.expectEqual(@as(usize, 2), out.batch_steps_run);
+    try std.testing.expectEqual(@as(i64, 2), out.batch_affected);
+}
+
+test "parse rejects malformed baton" {
+    const gpa = std.testing.allocator;
+    const body =
+        \\{"baton":123,"results":[]}
+    ;
+    try std.testing.expectError(error.Sql, parsePipelineResponse(gpa, body));
 }
 
 test "parse execute ok response" {

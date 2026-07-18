@@ -47,7 +47,7 @@ var conn = db.connect();
 
 ### A. Pure Zig sync client (preferred)
 
-```
+```text
 OpenOptions{path + url}
   → local sqlite3 open (existing)
   → remote Session (existing Hrana HTTP)
