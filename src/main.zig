@@ -1,71 +1,83 @@
 const std = @import("std");
-const Io = std.Io;
+const libsql = @import("zig_libsql");
 
-const zig_libsql = @import("zig_libsql");
-
+/// Demo CLI: `zig build run -- [path] [sql]`
+/// Defaults: path=`:memory:`, sql=`select 1 as n;`
 pub fn main(init: std.process.Init) !void {
-    // Prints to stderr, unbuffered, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-
-    // This is appropriate for anything that lives as long as the process.
-    const arena: std.mem.Allocator = init.arena.allocator();
-
-    // Accessing command line arguments:
+    const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
-    for (args) |arg| {
-        std.log.info("arg: {s}", .{arg});
+
+    // args[0] is executable name when present.
+    var path: []const u8 = ":memory:";
+    var sql: []const u8 = "select 1 as n;";
+    if (args.len >= 2) path = args[1];
+    if (args.len >= 3) sql = args[2];
+
+    var db = libsql.Database.open(arena, .{ .path = path }) catch |e| {
+        std.debug.print("open failed: {s}\n", .{@errorName(e)});
+        return e;
+    };
+    defer db.deinit();
+
+    var conn = db.connect();
+
+    // Multi-statement scripts (DDL + DML + SELECT) go through exec when there
+    // is no trailing SELECT-only prepare; for demo simplicity, try prepare
+    // first and fall back to exec if prepare fails on multi-statement shapes.
+    var stmt = conn.prepare(sql) catch {
+        conn.exec(sql, .{}) catch |e| {
+            std.debug.print("exec failed: {s}\n", .{@errorName(e)});
+            return e;
+        };
+        std.debug.print("ok (engine {s}, zig-libsql {s})\n", .{
+            libsql.engineVersion(),
+            libsql.version,
+        });
+        return;
+    };
+    defer stmt.deinit();
+
+    var row_i: usize = 0;
+    while (try stmt.step()) |row| {
+        const n = row.columnCount();
+        if (row_i == 0) {
+        var col: usize = 0;
+        while (col < n) : (col += 1) {
+            if (col > 0) std.debug.print("|", .{});
+            const name = try row.columnName(col);
+            std.debug.print("{s}", .{name});
+        }
+        std.debug.print("\n", .{});
+        }
+        var col: usize = 0;
+        while (col < n) : (col += 1) {
+            if (col > 0) std.debug.print("|", .{});
+            if (try row.isNull(col)) {
+                std.debug.print("NULL", .{});
+            } else {
+                const ty = try row.columnType(col);
+                switch (ty) {
+                    libsql.column_type.integer => std.debug.print("{d}", .{try row.int(col)}),
+                    libsql.column_type.float => std.debug.print("{d}", .{try row.float(col)}),
+                    else => {
+                        const t = (try row.text(col)) orelse "";
+                        std.debug.print("{s}", .{t});
+                    },
+                }
+            }
+        }
+        std.debug.print("\n", .{});
+        row_i += 1;
     }
 
-    // In order to do I/O operations need an `Io` instance.
-    const io = init.io;
-
-    // Stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    const stdout_writer = &stdout_file_writer.interface;
-
-    try zig_libsql.printAnotherMessage(stdout_writer);
-
-    try stdout_writer.flush(); // Don't forget to flush!
+    if (row_i == 0) {
+        std.debug.print("ok (engine {s}, zig-libsql {s})\n", .{
+            libsql.engineVersion(),
+            libsql.version,
+        });
+    }
 }
 
-test "simple test" {
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(i32) = .empty;
-    defer list.deinit(gpa); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(gpa, 42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
-
-test "fuzz example" {
-    try std.testing.fuzz({}, testOne, .{});
-}
-
-fn testOne(context: void, smith: *std.testing.Smith) !void {
-    _ = context;
-    // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(u8) = .empty;
-    defer list.deinit(gpa);
-    while (!smith.eos()) switch (smith.value(enum { add_data, dup_data })) {
-        .add_data => {
-            const slice = try list.addManyAsSlice(gpa, smith.value(u4));
-            smith.bytes(slice);
-        },
-        .dup_data => {
-            if (list.items.len == 0) continue;
-            if (list.items.len > std.math.maxInt(u32)) return error.SkipZigTest;
-            const len = smith.valueRangeAtMost(u32, 1, @min(32, list.items.len));
-            const off = smith.valueRangeAtMost(u32, 0, @intCast(list.items.len - len));
-            try list.appendSlice(gpa, list.items[off..][0..len]);
-            try std.testing.expectEqualSlices(
-                u8,
-                list.items[off..][0..len],
-                list.items[list.items.len - len ..],
-            );
-        },
-    };
+test "cli module loads" {
+    try std.testing.expect(libsql.version.len > 0);
 }

@@ -1,18 +1,233 @@
-//! By convention, root.zig is the root source file when making a package.
+//! zig-libsql — pure(as)-Zig libSQL / SQLite adapter.
+//!
+//! Local engine: vendored SQLite amalgamation compiled by Zig.
+//! Remote (Hrana): Phase 2 — see docs/ROADMAP.md.
+
 const std = @import("std");
-const Io = std.Io;
+const c = @import("c/sqlite.zig");
 
-/// This is a documentation comment to explain the `printAnotherMessage` function below.
-///
-/// Accepting an `Io.Writer` instance is a handy way to write reusable code.
-pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {
-    try writer.print("Run `zig build test` to run the tests.\n", .{});
+pub const version = "0.1.0";
+
+pub const Error = @import("error.zig").Error;
+pub const Value = @import("value.zig").Value;
+pub const Database = @import("database.zig").Database;
+pub const OpenOptions = @import("database.zig").OpenOptions;
+pub const open = @import("database.zig").open;
+pub const Connection = @import("connection.zig").Connection;
+pub const Statement = @import("statement.zig").Statement;
+pub const Row = @import("rows.zig").Row;
+
+/// SQLite fundamental datatype codes as returned by `Row.columnType`.
+pub const column_type = struct {
+    pub const integer: c_int = c.SQLITE_INTEGER;
+    pub const float: c_int = c.SQLITE_FLOAT;
+    pub const text: c_int = c.SQLITE_TEXT;
+    pub const blob: c_int = c.SQLITE_BLOB;
+    pub const @"null": c_int = c.SQLITE_NULL;
+};
+
+/// SQLite amalgamation version string from the linked engine.
+pub fn engineVersion() []const u8 {
+    return std.mem.span(c.sqlite3_libversion());
 }
 
-pub fn add(a: i32, b: i32) i32 {
-    return a + b;
+test {
+    _ = @import("util/path.zig");
+    _ = @import("error.zig");
+    _ = @import("value.zig");
+    _ = @import("rows.zig");
+    _ = @import("statement.zig");
+    _ = @import("connection.zig");
+    _ = @import("database.zig");
+    _ = @import("backend/remote.zig");
 }
 
-test "basic add functionality" {
-    try std.testing.expect(add(3, 7) == 10);
+test "engine version non-empty" {
+    const v = engineVersion();
+    try std.testing.expect(v.len > 0);
+}
+
+test "memory create insert select" {
+    const gpa = std.testing.allocator;
+    var db = try Database.open(gpa, .{ .path = ":memory:" });
+    defer db.deinit();
+    var conn = db.connect();
+
+    try conn.exec(
+        \\create table t(id integer primary key, name text not null, score real, blob blob);
+    , .{});
+
+    var ins = try conn.prepare("insert into t(name, score, blob) values (?1, ?2, ?3);");
+    defer ins.deinit();
+    try ins.bind(.{ "alice", 3.5, "hi" });
+    try ins.execute();
+    try std.testing.expectEqual(@as(i64, 1), conn.changes());
+    try std.testing.expectEqual(@as(i64, 1), conn.lastInsertRowid());
+
+    var sel = try conn.prepare("select id, name, score, blob from t where id = ?1;");
+    defer sel.deinit();
+    try sel.bindInt(1, 1);
+    const row = (try sel.step()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(i64, 1), try row.int(0));
+    try std.testing.expectEqualStrings("alice", (try row.text(1)).?);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.5), try row.float(2), 0.0001);
+    try std.testing.expectEqualStrings("hi", (try row.blob(3)).?);
+    try std.testing.expect((try sel.step()) == null);
+}
+
+test "null bind and column" {
+    const gpa = std.testing.allocator;
+    var db = try Database.open(gpa, .{ .path = ":memory:" });
+    defer db.deinit();
+    var conn = db.connect();
+    try conn.exec("create table t(id integer primary key, note text);", .{});
+    var ins = try conn.prepare("insert into t(note) values (?1);");
+    defer ins.deinit();
+    try ins.bindNull(1);
+    try ins.execute();
+
+    var sel = try conn.prepare("select note from t where id = 1;");
+    defer sel.deinit();
+    const row = (try sel.step()) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(try row.isNull(0));
+    try std.testing.expect((try row.text(0)) == null);
+}
+
+test "transaction rollback" {
+    const gpa = std.testing.allocator;
+    var db = try Database.open(gpa, .{ .path = ":memory:" });
+    defer db.deinit();
+    var conn = db.connect();
+    try conn.exec("create table t(x integer);", .{});
+    try conn.begin();
+    try conn.exec("insert into t(x) values (1);", .{});
+    try conn.rollback();
+
+    var sel = try conn.prepare("select count(*) from t;");
+    defer sel.deinit();
+    const row = (try sel.step()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(i64, 0), try row.int(0));
+}
+
+test "file durability" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    // Unique path under /tmp so parallel tests do not clash.
+    const db_path = try std.fmt.allocPrint(gpa, "/tmp/zig-libsql-test-{d}-{d}.db", .{
+        std.os.linux.getpid(),
+        std.testing.random_seed,
+    });
+    defer {
+        std.Io.Dir.cwd().deleteFile(io, db_path) catch {};
+        gpa.free(db_path);
+    }
+
+    {
+        var db = try Database.open(gpa, .{ .path = db_path });
+        defer db.deinit();
+        var conn = db.connect();
+        try conn.exec("create table t(x text);", .{});
+        try conn.execute("insert into t(x) values (?1);", .{"persist"});
+    }
+
+    {
+        var db = try Database.open(gpa, .{ .path = db_path, .create = false });
+        defer db.deinit();
+        var conn = db.connect();
+        var sel = try conn.prepare("select x from t;");
+        defer sel.deinit();
+        const row = (try sel.step()) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings("persist", (try row.text(0)).?);
+    }
+}
+
+test "remote open unsupported" {
+    const gpa = std.testing.allocator;
+    try std.testing.expectError(error.Unsupported, Database.open(gpa, .{
+        .path = "libsql://example.turso.io",
+        .auth_token = "secret",
+    }));
+}
+
+test "convenience open owns handle" {
+    const gpa = std.testing.allocator;
+    var conn = try open(gpa, ":memory:");
+    defer conn.deinit();
+    try conn.exec("select 1;", .{});
+}
+
+test "optional text bind" {
+    const gpa = std.testing.allocator;
+    var db = try Database.open(gpa, .{ .path = ":memory:" });
+    defer db.deinit();
+    var conn = db.connect();
+    try conn.exec("create table t(a text, b text);", .{});
+    const missing: ?[]const u8 = null;
+    try conn.execute("insert into t(a, b) values (?1, ?2);", .{ "x", missing });
+    var sel = try conn.prepare("select a, b from t;");
+    defer sel.deinit();
+    const row = (try sel.step()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("x", (try row.text(0)).?);
+    try std.testing.expect(try row.isNull(1));
+}
+
+test "empty blob and text bind as non-null" {
+    const gpa = std.testing.allocator;
+    var db = try Database.open(gpa, .{ .path = ":memory:" });
+    defer db.deinit();
+    var conn = db.connect();
+    try conn.exec("create table t(b blob, s text);", .{});
+    var ins = try conn.prepare("insert into t(b, s) values (?1, ?2);");
+    defer ins.deinit();
+    try ins.bindBlob(1, "");
+    try ins.bindText(2, "");
+    try ins.execute();
+
+    var sel = try conn.prepare("select b, s from t;");
+    defer sel.deinit();
+    const row = (try sel.step()) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!(try row.isNull(0)));
+    try std.testing.expect(!(try row.isNull(1)));
+    try std.testing.expectEqualStrings("", (try row.blob(0)).?);
+    try std.testing.expectEqualStrings("", (try row.text(1)).?);
+}
+
+test "prepare rejects trailing statement" {
+    const gpa = std.testing.allocator;
+    var db = try Database.open(gpa, .{ .path = ":memory:" });
+    defer db.deinit();
+    var conn = db.connect();
+    try std.testing.expectError(error.Sql, conn.prepare("select 1; select 2;"));
+    // A single statement with a trailing `;` and whitespace still prepares.
+    var ok = try conn.prepare("select 1;  ");
+    ok.deinit();
+}
+
+test "bind rejects argument count mismatch" {
+    const gpa = std.testing.allocator;
+    var db = try Database.open(gpa, .{ .path = ":memory:" });
+    defer db.deinit();
+    var conn = db.connect();
+    try conn.exec("create table t(a integer, b integer);", .{});
+    var ins = try conn.prepare("insert into t(a, b) values (?1, ?2);");
+    defer ins.deinit();
+    try std.testing.expectError(error.Bind, ins.bind(.{1}));
+    // Empty args against a parameterized statement must also fail closed.
+    try std.testing.expectError(error.Bind, conn.execute("insert into t(a, b) values (?1, ?2);", .{}));
+}
+
+test "statement execute is idempotent after done" {
+    const gpa = std.testing.allocator;
+    var db = try Database.open(gpa, .{ .path = ":memory:" });
+    defer db.deinit();
+    var conn = db.connect();
+    try conn.exec("create table t(x integer);", .{});
+    var ins = try conn.prepare("insert into t(x) values (1);");
+    defer ins.deinit();
+    try ins.execute();
+    try ins.execute(); // no-op: must not insert a second row
+    var sel = try conn.prepare("select count(*) from t;");
+    defer sel.deinit();
+    const row = (try sel.step()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(i64, 1), try row.int(0));
 }
