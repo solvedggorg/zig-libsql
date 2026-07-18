@@ -27,15 +27,19 @@ pub const Session = struct {
         allocator: std.mem.Allocator,
         url: []const u8,
         auth_token: ?[]const u8,
+        allow_insecure: bool,
     ) err.Error!Session {
         const http_base = path_util.toHttpBase(allocator, url) catch return error.InvalidPath;
         errdefer allocator.free(http_base);
 
-        // Fail closed: never transmit a bearer token over a plaintext (non-TLS)
-        // origin. `http://` / `ws://` endpoints would leak the token in cleartext,
-        // so reject a token unless the resolved base URL is HTTPS.
-        if (auth_token != null and !std.mem.startsWith(u8, http_base, "https://")) {
-            return error.InvalidPath;
+        // Fail closed on plaintext (non-TLS) transport. `http://` / `ws://`
+        // origins expose the SQL and results in cleartext, and a bearer token
+        // would leak outright, so:
+        //   - a token over plaintext is always rejected, and
+        //   - tokenless plaintext requires an explicit `allow_insecure` opt-in
+        //     rather than silently falling back to cleartext.
+        if (!std.mem.startsWith(u8, http_base, "https://")) {
+            if (auth_token != null or !allow_insecure) return error.InvalidPath;
         }
 
         var token_owned: ?[]u8 = null;
@@ -190,7 +194,7 @@ fn originOf(url: []const u8) ?[]const u8 {
 test "session open maps libsql url" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    var s = try Session.open(io, gpa, "libsql://db.example.com", "tok");
+    var s = try Session.open(io, gpa, "libsql://db.example.com", "tok", false);
     defer s.deinit();
     try std.testing.expectEqualStrings("https://db.example.com", s.base_url);
 }
@@ -198,14 +202,24 @@ test "session open maps libsql url" {
 test "session rejects token over plaintext http" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    try std.testing.expectError(error.InvalidPath, Session.open(io, gpa, "http://db.example.com", "tok"));
-    try std.testing.expectError(error.InvalidPath, Session.open(io, gpa, "ws://db.example.com", "tok"));
+    // A token over plaintext is rejected regardless of the insecure opt-in.
+    try std.testing.expectError(error.InvalidPath, Session.open(io, gpa, "http://db.example.com", "tok", false));
+    try std.testing.expectError(error.InvalidPath, Session.open(io, gpa, "ws://db.example.com", "tok", false));
+    try std.testing.expectError(error.InvalidPath, Session.open(io, gpa, "http://db.example.com", "tok", true));
 }
 
-test "session allows plaintext http without token" {
+test "session rejects tokenless plaintext without opt-in" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    var s = try Session.open(io, gpa, "http://db.example.com", null);
+    // Fail closed: tokenless plaintext still exposes SQL/results in cleartext.
+    try std.testing.expectError(error.InvalidPath, Session.open(io, gpa, "http://db.example.com", null, false));
+    try std.testing.expectError(error.InvalidPath, Session.open(io, gpa, "ws://db.example.com", null, false));
+}
+
+test "session allows plaintext http without token when opted in" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var s = try Session.open(io, gpa, "http://db.example.com", null, true);
     defer s.deinit();
     try std.testing.expectEqualStrings("http://db.example.com", s.base_url);
 }

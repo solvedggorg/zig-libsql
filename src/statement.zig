@@ -18,12 +18,12 @@ pub const Statement = struct {
     // remote
     session: ?*remote.Session = null,
     sql: ?[]u8 = null,
+    /// Positional binds. A `.text`/`.blob` entry owns its slice (allocated by
+    /// this statement); replacing an index frees the previous owned slice.
     binds: std.ArrayListUnmanaged(value.Value) = .empty,
+    /// Named binds. Each entry owns its `name`, and a `.text`/`.blob` value owns
+    /// its slice; rebinding a name replaces in place instead of appending.
     named_binds: std.ArrayListUnmanaged(batch_mod.NamedArg) = .empty,
-    /// Owned string/blob storage for bind values that need ownership.
-    bind_storage: std.ArrayListUnmanaged([]u8) = .empty,
-    /// Owned copies of named parameter names.
-    name_storage: std.ArrayListUnmanaged([]u8) = .empty,
     result: ?pipeline.StmtResult = null,
     row_index: usize = 0,
 
@@ -37,11 +37,12 @@ pub const Statement = struct {
             .remote => {
                 if (self.result) |*r| r.deinit(self.allocator);
                 if (self.sql) |s| self.allocator.free(s);
-                for (self.bind_storage.items) |s| self.allocator.free(s);
-                self.bind_storage.deinit(self.allocator);
-                for (self.name_storage.items) |s| self.allocator.free(s);
-                self.name_storage.deinit(self.allocator);
+                for (self.binds.items) |v| freeOwnedValue(self.allocator, v);
                 self.binds.deinit(self.allocator);
+                for (self.named_binds.items) |entry| {
+                    self.allocator.free(entry.name);
+                    freeOwnedValue(self.allocator, entry.value);
+                }
                 self.named_binds.deinit(self.allocator);
             },
         }
@@ -66,11 +67,12 @@ pub const Statement = struct {
         switch (self.kind) {
             .local => try err.mapRc(c.sqlite3_clear_bindings(self.stmt.?)),
             .remote => {
-                for (self.bind_storage.items) |s| self.allocator.free(s);
-                self.bind_storage.clearRetainingCapacity();
-                for (self.name_storage.items) |s| self.allocator.free(s);
-                self.name_storage.clearRetainingCapacity();
+                for (self.binds.items) |v| freeOwnedValue(self.allocator, v);
                 self.binds.clearRetainingCapacity();
+                for (self.named_binds.items) |entry| {
+                    self.allocator.free(entry.name);
+                    freeOwnedValue(self.allocator, entry.value);
+                }
                 self.named_binds.clearRetainingCapacity();
             },
         }
@@ -113,11 +115,9 @@ pub const Statement = struct {
             },
             .remote => {
                 const owned = self.allocator.dupe(u8, text) catch return error.OutOfMemory;
+                // On success `binds[idx-1]` takes ownership of `owned`; on error
+                // remoteSet leaves ownership with us, so free it exactly once.
                 errdefer self.allocator.free(owned);
-                try self.bind_storage.append(self.allocator, owned);
-                // Undo the append if the set below fails, so `owned` is freed
-                // exactly once (here) and not again by deinit.
-                errdefer _ = self.bind_storage.pop();
                 try self.remoteSet(idx, .{ .text = owned });
             },
         }
@@ -141,11 +141,9 @@ pub const Statement = struct {
             },
             .remote => {
                 const owned = self.allocator.dupe(u8, blob) catch return error.OutOfMemory;
+                // On success `binds[idx-1]` takes ownership of `owned`; on error
+                // remoteSet leaves ownership with us, so free it exactly once.
                 errdefer self.allocator.free(owned);
-                try self.bind_storage.append(self.allocator, owned);
-                // Undo the append if the set below fails, so `owned` is freed
-                // exactly once (here) and not again by deinit.
-                errdefer _ = self.bind_storage.pop();
                 try self.remoteSet(idx, .{ .blob = owned });
             },
         }
@@ -183,11 +181,9 @@ pub const Statement = struct {
             },
             .remote => {
                 const owned = self.allocator.dupe(u8, text) catch return error.OutOfMemory;
+                // On success remoteNamedSet takes ownership of `owned`; on error
+                // ownership stays with us, so free it exactly once.
                 errdefer self.allocator.free(owned);
-                try self.bind_storage.append(self.allocator, owned);
-                // Undo the append if the set below fails, so `owned` is freed
-                // exactly once (here) and not again by deinit.
-                errdefer _ = self.bind_storage.pop();
                 try self.remoteNamedSet(name, .{ .text = owned });
             },
         }
@@ -201,11 +197,9 @@ pub const Statement = struct {
             },
             .remote => {
                 const owned = self.allocator.dupe(u8, blob) catch return error.OutOfMemory;
+                // On success remoteNamedSet takes ownership of `owned`; on error
+                // ownership stays with us, so free it exactly once.
                 errdefer self.allocator.free(owned);
-                try self.bind_storage.append(self.allocator, owned);
-                // Undo the append if the set below fails, so `owned` is freed
-                // exactly once (here) and not again by deinit.
-                errdefer _ = self.bind_storage.pop();
                 try self.remoteNamedSet(name, .{ .blob = owned });
             },
         }
@@ -252,22 +246,41 @@ pub const Statement = struct {
         return error.Bind;
     }
 
+    /// Free the heap storage a bind value owns (text/blob); no-op otherwise.
+    fn freeOwnedValue(allocator: std.mem.Allocator, v: value.Value) void {
+        switch (v) {
+            .text => |t| allocator.free(t),
+            .blob => |b| allocator.free(b),
+            else => {},
+        }
+    }
+
     fn remoteSet(self: *Statement, idx: usize, v: value.Value) err.Error!void {
         if (idx == 0) return error.Bind;
         const i = idx - 1;
         while (self.binds.items.len <= i) {
             try self.binds.append(self.allocator, .{ .null = {} });
         }
+        // Replace in place: free the previous owned storage so rebinding an
+        // index does not accumulate stale allocations (local replacement
+        // semantics), then take ownership of the new value.
+        freeOwnedValue(self.allocator, self.binds.items[i]);
         self.binds.items[i] = v;
     }
 
     fn remoteNamedSet(self: *Statement, name: []const u8, v: value.Value) err.Error!void {
+        // Update an existing binding for this name in place: free its previous
+        // owned value and reuse the already-owned name. This avoids growing the
+        // list and sending duplicate named values when a statement is reused.
+        for (self.named_binds.items) |*entry| {
+            if (std.mem.eql(u8, entry.name, name)) {
+                freeOwnedValue(self.allocator, entry.value);
+                entry.value = v;
+                return;
+            }
+        }
         const name_owned = self.allocator.dupe(u8, name) catch return error.OutOfMemory;
         errdefer self.allocator.free(name_owned);
-        try self.name_storage.append(self.allocator, name_owned);
-        // Undo the append if the named_binds append fails, so `name_owned` is
-        // freed exactly once (here) and not again by deinit.
-        errdefer _ = self.name_storage.pop();
         try self.named_binds.append(self.allocator, .{ .name = name_owned, .value = v });
     }
 
@@ -485,3 +498,31 @@ pub const Statement = struct {
         };
     }
 };
+
+test "remote rebind replaces without leaking or duplicating" {
+    // testing.allocator fails the test on any leak or double-free, so this
+    // exercises the ownership model for reused remote statements directly.
+    const gpa = std.testing.allocator;
+    var stmt = Statement{ .kind = .remote, .allocator = gpa };
+    defer stmt.deinit();
+
+    // Rebinding the same positional index must free the prior owned storage and
+    // keep a single entry, not accumulate one allocation per bind.
+    try stmt.bindText(1, "first");
+    try stmt.bindBlob(1, "second-blob");
+    try stmt.bindText(1, "third");
+    try std.testing.expectEqual(@as(usize, 1), stmt.binds.items.len);
+    try std.testing.expectEqualStrings("third", stmt.binds.items[0].text);
+
+    // Rebinding the same name must replace in place (no duplicate NamedArg,
+    // no leaked name/value copies).
+    try stmt.bindNamedText("a", "x");
+    try stmt.bindNamedBlob("a", "y-blob");
+    try stmt.bindNamedInt("a", 7);
+    try std.testing.expectEqual(@as(usize, 1), stmt.named_binds.items.len);
+    try std.testing.expectEqual(@as(i64, 7), stmt.named_binds.items[0].value.integer);
+
+    // A distinct name appends a new binding.
+    try stmt.bindNamedText("b", "z");
+    try std.testing.expectEqual(@as(usize, 2), stmt.named_binds.items.len);
+}

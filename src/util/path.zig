@@ -81,7 +81,11 @@ test "parse remote" {
 /// - `wss://host/...` → `https://host/...`
 /// - `ws://host/...` → `http://host/...`
 /// - `https://` / `http://` left as-is (trailing slash stripped)
-pub fn toHttpBase(allocator: std.mem.Allocator, url: []const u8) error{OutOfMemory}![]u8 {
+///
+/// A Hrana base URL carries only `scheme://authority[/path]`; the client appends
+/// its own `/v3/pipeline`. Query or fragment components are rejected (`InvalidUrl`)
+/// rather than silently mangled by the trailing-slash trim.
+pub fn toHttpBase(allocator: std.mem.Allocator, url: []const u8) error{ OutOfMemory, InvalidUrl }![]u8 {
     const mapped = blk: {
         if (std.mem.startsWith(u8, url, "libsql://")) {
             break :blk try std.fmt.allocPrint(allocator, "https://{s}", .{url["libsql://".len..]});
@@ -94,7 +98,14 @@ pub fn toHttpBase(allocator: std.mem.Allocator, url: []const u8) error{OutOfMemo
         }
         break :blk try allocator.dupe(u8, url);
     };
-    // Strip trailing slashes for stable join with /v3/pipeline
+    errdefer allocator.free(mapped);
+
+    // Fail closed on query/fragment: trimming trailing '/' below would also
+    // corrupt query or fragment data (e.g. `.../?x=/` → `.../?x=`), and such a
+    // URL is not a valid Hrana base anyway.
+    if (std.mem.indexOfAny(u8, mapped, "?#") != null) return error.InvalidUrl;
+
+    // Strip trailing path separators for a stable join with /v3/pipeline.
     var end = mapped.len;
     while (end > 0 and mapped[end - 1] == '/') end -= 1;
     if (end == mapped.len) return mapped;
@@ -108,4 +119,10 @@ test "toHttpBase libsql" {
     const u = try toHttpBase(gpa, "libsql://db.turso.io/");
     defer gpa.free(u);
     try std.testing.expectEqualStrings("https://db.turso.io", u);
+}
+
+test "toHttpBase rejects query or fragment" {
+    const gpa = std.testing.allocator;
+    try std.testing.expectError(error.InvalidUrl, toHttpBase(gpa, "https://db.turso.io/path?x=/"));
+    try std.testing.expectError(error.InvalidUrl, toHttpBase(gpa, "libsql://db.turso.io/#frag"));
 }

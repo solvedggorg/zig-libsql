@@ -97,15 +97,15 @@ test "transaction rollback" {
 test "file durability" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    // Unique path under /tmp so parallel tests do not clash.
-    const db_path = try std.fmt.allocPrint(gpa, "/tmp/zig-libsql-test-{d}-{d}.db", .{
-        std.os.linux.getpid(),
-        std.testing.random_seed,
-    });
-    defer {
-        std.Io.Dir.cwd().deleteFile(io, db_path) catch {};
-        gpa.free(db_path);
-    }
+    // Portable, unique temp directory (no hardcoded /tmp or Linux-only getpid).
+    // cleanup() removes the whole tree, so no stale files are left behind.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir_path = dir_buf[0..try tmp.dir.realPath(io, &dir_buf)];
+    const db_path = try std.fs.path.join(gpa, &.{ dir_path, "durability.db" });
+    defer gpa.free(db_path);
 
     {
         var db = try Database.open(gpa, .{ .path = db_path });
