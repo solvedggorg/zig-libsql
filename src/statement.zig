@@ -5,6 +5,7 @@ const value = @import("value.zig");
 const rows = @import("rows.zig");
 const remote = @import("backend/remote.zig");
 const pipeline = @import("backend/hrana/pipeline.zig");
+const batch_mod = @import("batch.zig");
 
 pub const Statement = struct {
     kind: enum { local, remote },
@@ -18,8 +19,11 @@ pub const Statement = struct {
     session: ?*remote.Session = null,
     sql: ?[]u8 = null,
     binds: std.ArrayListUnmanaged(value.Value) = .empty,
+    named_binds: std.ArrayListUnmanaged(batch_mod.NamedArg) = .empty,
     /// Owned string/blob storage for bind values that need ownership.
     bind_storage: std.ArrayListUnmanaged([]u8) = .empty,
+    /// Owned copies of named parameter names.
+    name_storage: std.ArrayListUnmanaged([]u8) = .empty,
     result: ?pipeline.StmtResult = null,
     row_index: usize = 0,
 
@@ -35,7 +39,10 @@ pub const Statement = struct {
                 if (self.sql) |s| self.allocator.free(s);
                 for (self.bind_storage.items) |s| self.allocator.free(s);
                 self.bind_storage.deinit(self.allocator);
+                for (self.name_storage.items) |s| self.allocator.free(s);
+                self.name_storage.deinit(self.allocator);
                 self.binds.deinit(self.allocator);
+                self.named_binds.deinit(self.allocator);
             },
         }
         self.* = undefined;
@@ -43,9 +50,7 @@ pub const Statement = struct {
 
     pub fn reset(self: *Statement) err.Error!void {
         switch (self.kind) {
-            .local => {
-                try err.mapRc(c.sqlite3_reset(self.stmt.?));
-            },
+            .local => try err.mapRc(c.sqlite3_reset(self.stmt.?)),
             .remote => {
                 if (self.result) |*r| {
                     r.deinit(self.allocator);
@@ -63,10 +68,15 @@ pub const Statement = struct {
             .remote => {
                 for (self.bind_storage.items) |s| self.allocator.free(s);
                 self.bind_storage.clearRetainingCapacity();
+                for (self.name_storage.items) |s| self.allocator.free(s);
+                self.name_storage.clearRetainingCapacity();
                 self.binds.clearRetainingCapacity();
+                self.named_binds.clearRetainingCapacity();
             },
         }
     }
+
+    // --- positional binds ---
 
     pub fn bindNull(self: *Statement, idx: usize) err.Error!void {
         switch (self.kind) {
@@ -93,14 +103,13 @@ pub const Statement = struct {
         switch (self.kind) {
             .local => {
                 const destructor: ?*const anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, c.SQLITE_TRANSIENT))));
-                const rc = c.sqlite3_bind_text(
+                try err.mapRc(c.sqlite3_bind_text(
                     self.stmt.?,
                     @intCast(idx),
                     if (text.len == 0) "" else text.ptr,
                     @intCast(text.len),
                     destructor,
-                );
-                try err.mapRc(rc);
+                ));
             },
             .remote => {
                 const owned = self.allocator.dupe(u8, text) catch return error.OutOfMemory;
@@ -115,14 +124,13 @@ pub const Statement = struct {
         switch (self.kind) {
             .local => {
                 const destructor: ?*const anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, c.SQLITE_TRANSIENT))));
-                const rc = c.sqlite3_bind_blob(
+                try err.mapRc(c.sqlite3_bind_blob(
                     self.stmt.?,
                     @intCast(idx),
                     if (blob.len == 0) null else blob.ptr,
                     @intCast(blob.len),
                     destructor,
-                );
-                try err.mapRc(rc);
+                ));
             },
             .remote => {
                 const owned = self.allocator.dupe(u8, blob) catch return error.OutOfMemory;
@@ -143,6 +151,91 @@ pub const Statement = struct {
         }
     }
 
+    // --- named binds ---
+
+    pub fn bindNamedNull(self: *Statement, name: []const u8) err.Error!void {
+        try self.bindNamedValue(name, .{ .null = {} });
+    }
+
+    pub fn bindNamedInt(self: *Statement, name: []const u8, v: i64) err.Error!void {
+        try self.bindNamedValue(name, .{ .integer = v });
+    }
+
+    pub fn bindNamedFloat(self: *Statement, name: []const u8, v: f64) err.Error!void {
+        try self.bindNamedValue(name, .{ .float = v });
+    }
+
+    pub fn bindNamedText(self: *Statement, name: []const u8, text: []const u8) err.Error!void {
+        switch (self.kind) {
+            .local => {
+                const idx = try self.resolveName(name);
+                try self.bindText(@intCast(idx), text);
+            },
+            .remote => {
+                const owned = self.allocator.dupe(u8, text) catch return error.OutOfMemory;
+                errdefer self.allocator.free(owned);
+                try self.bind_storage.append(self.allocator, owned);
+                try self.remoteNamedSet(name, .{ .text = owned });
+            },
+        }
+    }
+
+    pub fn bindNamedBlob(self: *Statement, name: []const u8, blob: []const u8) err.Error!void {
+        switch (self.kind) {
+            .local => {
+                const idx = try self.resolveName(name);
+                try self.bindBlob(@intCast(idx), blob);
+            },
+            .remote => {
+                const owned = self.allocator.dupe(u8, blob) catch return error.OutOfMemory;
+                errdefer self.allocator.free(owned);
+                try self.bind_storage.append(self.allocator, owned);
+                try self.remoteNamedSet(name, .{ .blob = owned });
+            },
+        }
+    }
+
+    pub fn bindNamedValue(self: *Statement, name: []const u8, v: value.Value) err.Error!void {
+        switch (self.kind) {
+            .local => {
+                const idx = try self.resolveName(name);
+                try self.bindValue(@intCast(idx), v);
+            },
+            .remote => switch (v) {
+                .text => |t| try self.bindNamedText(name, t),
+                .blob => |b| try self.bindNamedBlob(name, b),
+                else => try self.remoteNamedSet(name, v),
+            },
+        }
+    }
+
+    /// Resolve a parameter name to a 1-based index (local only).
+    /// Tries `name` as given, then `:name`, `@name`, `$name` if no prefix.
+    pub fn resolveName(self: *Statement, name: []const u8) err.Error!c_int {
+        if (self.kind != .local) return error.Unsupported;
+        var buf: [256]u8 = undefined;
+        if (name.len >= buf.len) return error.Bind;
+
+        // As given
+        {
+            const z = self.allocator.dupeZ(u8, name) catch return error.OutOfMemory;
+            defer self.allocator.free(z);
+            const idx = c.sqlite3_bind_parameter_index(self.stmt.?, z.ptr);
+            if (idx != 0) return idx;
+        }
+
+        // With common prefixes when name has none
+        if (name.len > 0 and name[0] != ':' and name[0] != '@' and name[0] != '$' and name[0] != '?') {
+            const prefixes = [_]u8{ ':', '@', '$' };
+            for (prefixes) |p| {
+                const z = std.fmt.bufPrintZ(&buf, "{c}{s}", .{ p, name }) catch return error.Bind;
+                const idx = c.sqlite3_bind_parameter_index(self.stmt.?, z.ptr);
+                if (idx != 0) return idx;
+            }
+        }
+        return error.Bind;
+    }
+
     fn remoteSet(self: *Statement, idx: usize, v: value.Value) err.Error!void {
         if (idx == 0) return error.Bind;
         const i = idx - 1;
@@ -152,15 +245,27 @@ pub const Statement = struct {
         self.binds.items[i] = v;
     }
 
+    fn remoteNamedSet(self: *Statement, name: []const u8, v: value.Value) err.Error!void {
+        const name_owned = self.allocator.dupe(u8, name) catch return error.OutOfMemory;
+        errdefer self.allocator.free(name_owned);
+        try self.name_storage.append(self.allocator, name_owned);
+        try self.named_binds.append(self.allocator, .{ .name = name_owned, .value = v });
+    }
+
+    /// Bind a tuple positionally, or a non-tuple struct by field name.
     pub fn bind(self: *Statement, args: anytype) err.Error!void {
         const Args = @TypeOf(args);
         const info = @typeInfo(Args);
         switch (info) {
             .@"struct" => |s| {
-                inline for (s.fields, 0..) |field, i| {
-                    const idx = i + 1;
-                    const field_val = @field(args, field.name);
-                    try bindAny(self, idx, field_val);
+                if (s.is_tuple) {
+                    inline for (s.fields, 0..) |field, i| {
+                        try bindAny(self, i + 1, @field(args, field.name));
+                    }
+                } else {
+                    inline for (s.fields) |field| {
+                        try bindAnyNamed(self, field.name, @field(args, field.name));
+                    }
                 }
             },
             else => @compileError("bind expects a tuple or struct of bind values"),
@@ -211,6 +316,53 @@ pub const Statement = struct {
                 @compileError("unsupported bind array type: " ++ @typeName(T));
             },
             else => @compileError("unsupported bind type: " ++ @typeName(T)),
+        }
+    }
+
+    fn bindAnyNamed(self: *Statement, name: []const u8, field_val: anytype) err.Error!void {
+        const T = @TypeOf(field_val);
+        if (T == value.Value) {
+            try self.bindNamedValue(name, field_val);
+            return;
+        }
+        if (T == @TypeOf(null)) {
+            try self.bindNamedNull(name);
+            return;
+        }
+        const ti = @typeInfo(T);
+        switch (ti) {
+            .null => try self.bindNamedNull(name),
+            .optional => {
+                if (field_val) |v| {
+                    try bindAnyNamed(self, name, v);
+                } else {
+                    try self.bindNamedNull(name);
+                }
+            },
+            .int, .comptime_int => try self.bindNamedInt(name, @intCast(field_val)),
+            .float, .comptime_float => try self.bindNamedFloat(name, @floatCast(field_val)),
+            .pointer => |ptr| {
+                if (ptr.size == .slice and ptr.child == u8) {
+                    try self.bindNamedText(name, field_val);
+                    return;
+                }
+                if (ptr.size == .one) {
+                    const child = @typeInfo(ptr.child);
+                    if (child == .array and child.array.child == u8) {
+                        try self.bindNamedText(name, field_val.*[0..]);
+                        return;
+                    }
+                }
+                @compileError("unsupported named bind pointer type: " ++ @typeName(T));
+            },
+            .array => |arr| {
+                if (arr.child == u8) {
+                    try self.bindNamedText(name, field_val[0..]);
+                    return;
+                }
+                @compileError("unsupported named bind array type: " ++ @typeName(T));
+            },
+            else => @compileError("unsupported named bind type: " ++ @typeName(T)),
         }
     }
 
@@ -284,9 +436,12 @@ pub const Statement = struct {
             r.deinit(self.allocator);
             self.result = null;
         }
-        const session = self.session.?;
-        const sql = self.sql.?;
-        const result = try session.execute(sql, self.binds.items, want_rows);
+        const result = try self.session.?.execute(
+            self.sql.?,
+            self.binds.items,
+            self.named_binds.items,
+            want_rows,
+        );
         self.result = result;
         self.row_index = 0;
     }
@@ -294,7 +449,7 @@ pub const Statement = struct {
     pub fn parameterCount(self: *Statement) usize {
         return switch (self.kind) {
             .local => @intCast(c.sqlite3_bind_parameter_count(self.stmt.?)),
-            .remote => self.binds.items.len,
+            .remote => self.binds.items.len + self.named_binds.items.len,
         };
     }
 };

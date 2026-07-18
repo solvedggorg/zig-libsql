@@ -4,6 +4,7 @@ const std = @import("std");
 const value = @import("../../value.zig");
 const value_json = @import("value_json.zig");
 const err = @import("../../error.zig");
+const batch_mod = @import("../../batch.zig");
 
 pub const StmtResult = struct {
     cols: [][]u8,
@@ -34,6 +35,10 @@ pub const PipelineOutcome = struct {
     failed: bool,
     /// Human message for failed (not logged with secrets).
     error_message: ?[]u8,
+    /// Total affected rows from batch (best-effort).
+    batch_affected: i64 = 0,
+    /// Number of batch steps that produced a result (not skipped).
+    batch_steps_run: usize = 0,
 
     pub fn deinit(self: *PipelineOutcome, allocator: std.mem.Allocator) void {
         if (self.baton) |b| allocator.free(b);
@@ -44,19 +49,20 @@ pub const PipelineOutcome = struct {
     }
 };
 
+pub const NamedArg = batch_mod.NamedArg;
+
 /// Build a pipeline body with a single `execute` request.
 pub fn buildExecuteBody(
     allocator: std.mem.Allocator,
     baton: ?[]const u8,
     sql: []const u8,
     args: []const value.Value,
+    named_args: []const NamedArg,
     want_rows: bool,
 ) err.Error![]u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
-    const w = &aw.writer;
-
-    writeExecuteBody(w, baton, sql, args, want_rows) catch return error.Sql;
+    writeExecuteBody(&aw.writer, baton, sql, args, named_args, want_rows) catch return error.Sql;
     return aw.toOwnedSlice() catch return error.OutOfMemory;
 }
 
@@ -65,6 +71,7 @@ fn writeExecuteBody(
     baton: ?[]const u8,
     sql: []const u8,
     args: []const value.Value,
+    named_args: []const NamedArg,
     want_rows: bool,
 ) std.Io.Writer.Error!void {
     try w.writeAll("{\"baton\":");
@@ -73,15 +80,80 @@ fn writeExecuteBody(
     } else {
         try w.writeAll("null");
     }
-    try w.writeAll(",\"requests\":[{\"type\":\"execute\",\"stmt\":{\"sql\":");
+    try w.writeAll(",\"requests\":[{\"type\":\"execute\",\"stmt\":");
+    try writeStmt(w, sql, args, named_args, want_rows);
+    try w.writeAll("}]}");
+}
+
+fn writeStmt(
+    w: *std.Io.Writer,
+    sql: []const u8,
+    args: []const value.Value,
+    named_args: []const NamedArg,
+    want_rows: bool,
+) std.Io.Writer.Error!void {
+    try w.writeAll("{\"sql\":");
     try writeJsonString(w, sql);
     try w.writeAll(",\"args\":[");
     for (args, 0..) |a, i| {
         if (i > 0) try w.writeAll(",");
         try value_json.writeValue(w, a);
     }
-    try w.print("],\"want_rows\":{s}}}]", .{if (want_rows) "true" else "false"});
+    try w.writeAll("],\"named_args\":[");
+    for (named_args, 0..) |na, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"name\":");
+        try writeJsonString(w, na.name);
+        try w.writeAll(",\"value\":");
+        try value_json.writeValue(w, na.value);
+        try w.writeAll("}");
+    }
+    try w.print("],\"want_rows\":{s}}}", .{if (want_rows) "true" else "false"});
+}
+
+/// Build a pipeline body with a Hrana `batch` request wrapping the steps.
+/// Wraps steps in BEGIN/COMMIT with ok-conditions so partial failure rolls back
+/// when the server supports conditional batch (Hrana 1+).
+pub fn buildBatchBody(
+    allocator: std.mem.Allocator,
+    baton: ?[]const u8,
+    steps: []const batch_mod.Step,
+) err.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    writeBatchBody(&aw.writer, baton, steps) catch return error.Sql;
+    return aw.toOwnedSlice() catch return error.OutOfMemory;
+}
+
+fn writeBatchBody(
+    w: *std.Io.Writer,
+    baton: ?[]const u8,
+    steps: []const batch_mod.Step,
+) std.Io.Writer.Error!void {
+    try w.writeAll("{\"baton\":");
+    if (baton) |b| {
+        try writeJsonString(w, b);
+    } else {
+        try w.writeAll("null");
+    }
+    // steps: [BEGIN, ...user, COMMIT] — user step i is Hrana index i+1
+    try w.writeAll(",\"requests\":[{\"type\":\"batch\",\"batch\":{\"steps\":[");
+    // BEGIN
+    try w.writeAll("{\"stmt\":");
+    try writeStmt(w, "BEGIN", &.{}, &.{}, false);
     try w.writeAll("}");
+    for (steps, 0..) |step, i| {
+        try w.writeAll(",");
+        // condition: previous step ok
+        try w.print("{{\"condition\":{{\"type\":\"ok\",\"step\":{d}}},\"stmt\":", .{i});
+        try writeStmt(w, step.sql, step.args, step.named_args, step.want_rows);
+        try w.writeAll("}");
+    }
+    // COMMIT conditioned on last user step
+    const commit_cond_step: usize = steps.len; // index of last user step in 0-based batch (after BEGIN is index steps.len)
+    try w.print(",{{\"condition\":{{\"type\":\"ok\",\"step\":{d}}},\"stmt\":", .{commit_cond_step});
+    try writeStmt(w, "COMMIT", &.{}, &.{}, false);
+    try w.writeAll("}]}]}}");
 }
 
 /// Build a pipeline body with a single `sequence` request (multi-statement, no rows).
@@ -232,6 +304,10 @@ pub fn parsePipelineResponse(allocator: std.mem.Allocator, body: []const u8) err
     if (std.mem.eql(u8, resp_type_s, "execute")) {
         const result = resp_obj.get("result") orelse return error.Sql;
         outcome.stmt = try parseStmtResult(allocator, result);
+    } else if (std.mem.eql(u8, resp_type_s, "batch")) {
+        if (resp_obj.get("result")) |br| {
+            try parseBatchResult(allocator, br, &outcome);
+        }
     } else if (std.mem.eql(u8, resp_type_s, "sequence") or std.mem.eql(u8, resp_type_s, "close")) {
         // no rows
     } else {
@@ -239,6 +315,55 @@ pub fn parsePipelineResponse(allocator: std.mem.Allocator, body: []const u8) err
     }
 
     return outcome;
+}
+
+fn parseBatchResult(allocator: std.mem.Allocator, v: std.json.Value, outcome: *PipelineOutcome) err.Error!void {
+    const obj = switch (v) {
+        .object => |o| o,
+        else => return error.Sql,
+    };
+    // step_results is an array (JSON) of StmtResult | null
+    if (obj.get("step_results")) |sr| {
+        const arr = switch (sr) {
+            .array => |a| a,
+            else => return,
+        };
+        for (arr.items) |item| {
+            switch (item) {
+                .null => {},
+                .object => {
+                    outcome.batch_steps_run += 1;
+                    // best-effort affected count
+                    if (item.object.get("affected_row_count")) |a| {
+                        switch (a) {
+                            .integer => |n| outcome.batch_affected += @intCast(@max(n, 0)),
+                            else => {},
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+    // step_errors: if any non-null, mark failed
+    if (obj.get("step_errors")) |se| {
+        const arr = switch (se) {
+            .array => |a| a,
+            else => return,
+        };
+        for (arr.items) |item| {
+            if (item != .null) {
+                outcome.failed = true;
+                if (item == .object) {
+                    if (item.object.get("message")) |m| {
+                        if (m == .string and outcome.error_message == null) {
+                            outcome.error_message = try allocator.dupe(u8, m.string);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn parseStmtResult(allocator: std.mem.Allocator, v: std.json.Value) err.Error!StmtResult {
@@ -335,10 +460,31 @@ fn parseStmtResult(allocator: std.mem.Allocator, v: std.json.Value) err.Error!St
 
 test "build execute body has sql" {
     const gpa = std.testing.allocator;
-    const body = try buildExecuteBody(gpa, null, "select 1", &.{}, true);
+    const body = try buildExecuteBody(gpa, null, "select 1", &.{}, &.{}, true);
     defer gpa.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "select 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"baton\":null") != null);
+}
+
+test "build execute body named args" {
+    const gpa = std.testing.allocator;
+    const named = [_]NamedArg{.{ .name = ":id", .value = .{ .integer = 7 } }};
+    const body = try buildExecuteBody(gpa, null, "select :id", &.{}, &named, true);
+    defer gpa.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "named_args") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, ":id") != null);
+}
+
+test "build batch body wraps begin commit" {
+    const gpa = std.testing.allocator;
+    const steps = [_]batch_mod.Step{
+        .{ .sql = "insert into t values (1)" },
+    };
+    const body = try buildBatchBody(gpa, null, &steps);
+    defer gpa.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "BEGIN") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "COMMIT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"batch\"") != null);
 }
 
 test "parse execute ok response" {

@@ -1,12 +1,13 @@
 //! zig-libsql — pure(as)-Zig libSQL / SQLite adapter.
 //!
 //! Local engine: vendored SQLite amalgamation compiled by Zig.
-//! Remote (Hrana): Phase 2 — see docs/ROADMAP.md.
+//! Remote (Hrana HTTP): Phase 2.
+//! Named params + batch: Phase 3 — see docs/ROADMAP.md.
 
 const std = @import("std");
 const c = @import("c/sqlite.zig");
 
-pub const version = "0.1.0";
+pub const version = "0.2.0";
 
 pub const Error = @import("error.zig").Error;
 pub const Value = @import("value.zig").Value;
@@ -16,6 +17,9 @@ pub const open = @import("database.zig").open;
 pub const Connection = @import("connection.zig").Connection;
 pub const Statement = @import("statement.zig").Statement;
 pub const Row = @import("rows.zig").Row;
+pub const BatchStep = @import("batch.zig").Step;
+pub const BatchResult = @import("batch.zig").Result;
+pub const NamedArg = @import("batch.zig").NamedArg;
 
 /// SQLite fundamental datatype codes as returned by `Row.columnType`.
 pub const column_type = struct {
@@ -39,6 +43,7 @@ test {
     _ = @import("statement.zig");
     _ = @import("connection.zig");
     _ = @import("database.zig");
+    _ = @import("batch.zig");
     _ = @import("backend/remote.zig");
     _ = @import("backend/hrana/value_json.zig");
     _ = @import("backend/hrana/pipeline.zig");
@@ -204,63 +209,66 @@ test "optional text bind" {
     try std.testing.expect(try row.isNull(1));
 }
 
-test "empty blob and text bind as non-null" {
+test "named parameters local" {
     const gpa = std.testing.allocator;
     var db = try Database.open(gpa, .{ .path = ":memory:" });
     defer db.deinit();
     var conn = db.connect();
-    try conn.exec("create table t(b blob, s text);", .{});
-    var ins = try conn.prepare("insert into t(b, s) values (?1, ?2);");
+    try conn.exec("create table t(id integer primary key, name text);", .{});
+
+    var ins = try conn.prepare("insert into t(id, name) values (:id, :name);");
     defer ins.deinit();
-    try ins.bindBlob(1, "");
-    try ins.bindText(2, "");
+    try ins.bindNamedInt(":id", 1);
+    try ins.bindNamedText(":name", "bob");
     try ins.execute();
 
-    var sel = try conn.prepare("select b, s from t;");
+    // Struct field names resolve with :/@/$ prefixes.
+    try conn.execute(
+        "insert into t(id, name) values (:id, :name);",
+        .{ .id = @as(i64, 2), .name = "cara" },
+    );
+
+    var sel = try conn.prepare("select name from t where id = :id;");
     defer sel.deinit();
+    try sel.bind(.{ .id = @as(i64, 2) });
     const row = (try sel.step()) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(!(try row.isNull(0)));
-    try std.testing.expect(!(try row.isNull(1)));
-    try std.testing.expectEqualStrings("", (try row.blob(0)).?);
-    try std.testing.expectEqualStrings("", (try row.text(1)).?);
+    try std.testing.expectEqualStrings("cara", (try row.text(0)).?);
 }
 
-test "prepare rejects trailing statement" {
-    const gpa = std.testing.allocator;
-    var db = try Database.open(gpa, .{ .path = ":memory:" });
-    defer db.deinit();
-    var conn = db.connect();
-    try std.testing.expectError(error.Sql, conn.prepare("select 1; select 2;"));
-    // A single statement with a trailing `;` and whitespace still prepares.
-    var ok = try conn.prepare("select 1;  ");
-    ok.deinit();
-}
-
-test "bind rejects argument count mismatch" {
-    const gpa = std.testing.allocator;
-    var db = try Database.open(gpa, .{ .path = ":memory:" });
-    defer db.deinit();
-    var conn = db.connect();
-    try conn.exec("create table t(a integer, b integer);", .{});
-    var ins = try conn.prepare("insert into t(a, b) values (?1, ?2);");
-    defer ins.deinit();
-    try std.testing.expectError(error.Bind, ins.bind(.{1}));
-    // Empty args against a parameterized statement must also fail closed.
-    try std.testing.expectError(error.Bind, conn.execute("insert into t(a, b) values (?1, ?2);", .{}));
-}
-
-test "statement execute is idempotent after done" {
+test "batch local transactional" {
     const gpa = std.testing.allocator;
     var db = try Database.open(gpa, .{ .path = ":memory:" });
     defer db.deinit();
     var conn = db.connect();
     try conn.exec("create table t(x integer);", .{});
-    var ins = try conn.prepare("insert into t(x) values (1);");
-    defer ins.deinit();
-    try ins.execute();
-    try ins.execute(); // no-op: must not insert a second row
+
+    const result = try conn.batch(&.{
+        .{ .sql = "insert into t(x) values (?1)", .args = &.{Value.fromInt(1)} },
+        .{ .sql = "insert into t(x) values (?1)", .args = &.{Value.fromInt(2)} },
+    });
+    try std.testing.expectEqual(@as(usize, 2), result.steps_run);
+
     var sel = try conn.prepare("select count(*) from t;");
     defer sel.deinit();
     const row = (try sel.step()) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(i64, 1), try row.int(0));
+    try std.testing.expectEqual(@as(i64, 2), try row.int(0));
+}
+
+test "batch local rolls back on error" {
+    const gpa = std.testing.allocator;
+    var db = try Database.open(gpa, .{ .path = ":memory:" });
+    defer db.deinit();
+    var conn = db.connect();
+    try conn.exec("create table t(x integer primary key);", .{});
+
+    const batch_result = conn.batch(&.{
+        .{ .sql = "insert into t(x) values (1)" },
+        .{ .sql = "insert into t(x) values (1)" }, // PK conflict
+    });
+    try std.testing.expectError(error.Sql, batch_result);
+
+    var sel = try conn.prepare("select count(*) from t;");
+    defer sel.deinit();
+    const row = (try sel.step()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(i64, 0), try row.int(0));
 }

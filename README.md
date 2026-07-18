@@ -44,6 +44,18 @@ pub fn example(allocator: std.mem.Allocator) !void {
         const name = try row.text(1);
         std.debug.print("{d} {s}\n", .{ id, name.? });
     }
+
+    // Named parameters (Phase 3)
+    try conn.execute(
+        "insert into t(id, name) values (:id, :name);",
+        .{ .id = @as(i64, 2), .name = "bob" },
+    );
+
+    // Batch (Phase 3) — transactional locally; Hrana batch remotely
+    _ = try conn.batch(&.{
+        .{ .sql = "insert into t(id, name) values (3, 'c')" },
+        .{ .sql = "insert into t(id, name) values (4, 'd')" },
+    });
 }
 ```
 
@@ -74,9 +86,10 @@ Add as a dependency via path or `zig fetch` and import module **`zig_libsql`**.
 
 | Layer | Implementation |
 |-------|----------------|
-| Public API | Idiomatic Zig (`Database`, `Connection`, `Statement`) |
+| Public API | Idiomatic Zig (`Database`, `Connection`, `Statement`, `batch`) |
 | Local engine | `vendor/sqlite3.c` compiled into the module |
 | Remote | Hrana over HTTP JSON (`src/backend/hrana/`) |
+| Replicas | Design only — `docs/embedded-replicas.md` |
 | Rust | Not default; rusty-built bridge only if unavoidable |
 
 See [AGENTS.md](AGENTS.md) for engineering rules.

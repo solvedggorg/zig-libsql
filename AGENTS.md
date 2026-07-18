@@ -62,16 +62,20 @@ Version strings (`build.zig.zon`, `src/root.zig`) must stay in sync.
 |------|------|
 | `src/root.zig` | Public exports + version |
 | `src/database.zig` | Open modes, `Database` |
-| `src/connection.zig` | exec / prepare / query / tx |
-| `src/statement.zig` | bind / step / reset |
+| `src/connection.zig` | exec / prepare / batch / tx |
+| `src/statement.zig` | positional + named bind / step / reset |
+| `src/batch.zig` | `BatchStep` / `BatchResult` types |
 | `src/rows.zig` | Row iteration + typed getters |
 | `src/value.zig` | Value / bind types |
 | `src/error.zig` | Error set + mapping |
 | `src/c/sqlite.zig` | Minimal explicit `extern` surface |
 | `src/util/path.zig` | Path / URI parsing |
-| `src/backend/remote.zig` | Hrana (stub until Phase 2) |
+| `src/backend/remote.zig` | Hrana HTTP session |
+| `src/backend/hrana/` | Pipeline JSON + HTTP transport |
 | `vendor/` | Pinned amalgamation — integrity in `vendor/VERSION` |
 | `src/main.zig` | Demo CLI only (not library surface) |
+| `docs/embedded-replicas.md` | Replica design (not implemented) |
+| `docs/libsql-engine.md` | Engine pin policy |
 
 ---
 

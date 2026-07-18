@@ -1,8 +1,14 @@
 const std = @import("std");
 const c = @import("c/sqlite.zig");
 const err = @import("error.zig");
+const value = @import("value.zig");
 const Statement = @import("statement.zig").Statement;
 const remote = @import("backend/remote.zig");
+const batch_mod = @import("batch.zig");
+
+pub const BatchStep = batch_mod.Step;
+pub const BatchResult = batch_mod.Result;
+pub const NamedArg = batch_mod.NamedArg;
 
 /// SQL session over a local or remote database handle.
 /// Does not own the underlying handle when obtained via `Database.connect`
@@ -78,8 +84,9 @@ pub const Connection = struct {
         }
     }
 
-    /// Prepare, optional bind tuple, execute to completion, finalize.
+    /// Prepare, optional bind tuple/struct, execute to completion, finalize.
     /// Pass `.{}` when there are no bind parameters.
+    /// Tuples bind positionally; structs bind by field name.
     pub fn execute(self: *Connection, sql: []const u8, bind_args: anytype) err.Error!void {
         var stmt = try self.prepare(sql);
         defer stmt.deinit();
@@ -87,6 +94,41 @@ pub const Connection = struct {
         // against the statement's parameter count (fail closed).
         try stmt.bind(bind_args);
         try stmt.execute();
+    }
+
+    /// Run multiple statements as a batch.
+    ///
+    /// - **local:** `BEGIN` → each step prepare/bind/execute → `COMMIT` (rollback on error)
+    /// - **remote:** Hrana `batch` with BEGIN/COMMIT and ok-conditions
+    pub fn batch(self: *Connection, steps: []const batch_mod.Step) err.Error!batch_mod.Result {
+        if (steps.len == 0) return .{};
+
+        switch (self.kind) {
+            .local => {
+                try self.begin();
+                errdefer self.rollback() catch {};
+
+                var total_affected: i64 = 0;
+                for (steps) |step| {
+                    var stmt = try self.prepare(step.sql);
+                    defer stmt.deinit();
+                    for (step.args, 0..) |a, i| {
+                        try stmt.bindValue(i + 1, a);
+                    }
+                    for (step.named_args) |na| {
+                        try stmt.bindNamedValue(na.name, na.value);
+                    }
+                    try stmt.execute();
+                    total_affected += self.changes();
+                }
+                try self.commit();
+                return .{
+                    .steps_run = steps.len,
+                    .total_affected = total_affected,
+                };
+            },
+            .remote => return try self.session.?.batch(steps),
+        }
     }
 
     pub fn begin(self: *Connection) err.Error!void {

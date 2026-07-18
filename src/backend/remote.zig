@@ -7,6 +7,7 @@ const Io = std.Io;
 const err = @import("../error.zig");
 const value = @import("../value.zig");
 const path_util = @import("../util/path.zig");
+const batch_mod = @import("../batch.zig");
 const pipeline = @import("hrana/pipeline.zig");
 const http = @import("hrana/http.zig");
 
@@ -77,24 +78,23 @@ pub const Session = struct {
         if (out.failed) return error.Sql;
     }
 
-    /// Execute a single statement with binds; optionally return rows.
+    /// Execute a single statement with positional and named binds.
     pub fn execute(
         self: *Session,
         sql: []const u8,
         args: []const value.Value,
+        named_args: []const pipeline.NamedArg,
         want_rows: bool,
     ) err.Error!pipeline.StmtResult {
         if (self.closed) return error.Sql;
-        const body = try pipeline.buildExecuteBody(self.allocator, self.baton, sql, args, want_rows);
+        const body = try pipeline.buildExecuteBody(self.allocator, self.baton, sql, args, named_args, want_rows);
         defer self.allocator.free(body);
         var out = try self.roundTrip(body);
-        // Transfer stmt ownership; free the rest.
         const stmt = out.stmt orelse {
             const failed = out.failed;
             out.stmt = null;
             out.deinit(self.allocator);
             if (failed) return error.Sql;
-            // execute with no result payload — empty slices must be allocator-owned for deinit safety
             return .{
                 .cols = try self.allocator.alloc([]u8, 0),
                 .rows = try self.allocator.alloc([]@import("hrana/value_json.zig").Owned, 0),
@@ -107,6 +107,24 @@ pub const Session = struct {
         self.last_insert_rowid = stmt.last_insert_rowid;
         out.deinit(self.allocator);
         return stmt;
+    }
+
+    /// Run a transactional batch (BEGIN + steps + COMMIT with ok-conditions).
+    pub fn batch(self: *Session, steps: []const batch_mod.Step) err.Error!batch_mod.Result {
+        if (self.closed) return error.Sql;
+        if (steps.len == 0) return .{};
+
+        const body = try pipeline.buildBatchBody(self.allocator, self.baton, steps);
+        defer self.allocator.free(body);
+        var out = try self.roundTrip(body);
+        defer out.deinit(self.allocator);
+        if (out.failed) return error.Sql;
+
+        self.last_affected = out.batch_affected;
+        return .{
+            .steps_run = out.batch_steps_run,
+            .total_affected = out.batch_affected,
+        };
     }
 
     fn roundTrip(self: *Session, body: []const u8) err.Error!pipeline.PipelineOutcome {
@@ -124,12 +142,10 @@ pub const Session = struct {
 
         var out = try pipeline.parsePipelineResponse(self.allocator, resp_body);
 
-        // Update baton
         if (self.baton) |old| self.allocator.free(old);
         self.baton = out.baton;
         out.baton = null;
 
-        // Update base URL if server redirected the stream
         if (out.base_url) |new_base| {
             self.allocator.free(self.base_url);
             self.base_url = new_base;
@@ -137,7 +153,6 @@ pub const Session = struct {
         }
 
         if (self.baton == null) {
-            // Stream closed by server
             self.closed = true;
         }
 
