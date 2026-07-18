@@ -18,10 +18,12 @@ pub const Error = error{
 /// Map a SQLite result code to a library error when non-OK.
 pub fn mapRc(rc: c_int) Error!void {
     if (rc == c.SQLITE_OK) return;
+    // mapRc runs on statement-time paths (bind/reset/step); Database.open maps
+    // its own result codes. So SQLITE_CANTOPEN/PERM/NOTADB seen here are runtime
+    // SQL failures, not a failed open, and must map to Sql rather than Open.
     return switch (rc) {
         c.SQLITE_NOMEM => error.OutOfMemory,
         c.SQLITE_RANGE => error.Bind,
-        c.SQLITE_CANTOPEN, c.SQLITE_PERM, c.SQLITE_NOTADB => error.Open,
         else => error.Sql,
     };
 }

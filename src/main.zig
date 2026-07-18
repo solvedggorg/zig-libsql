@@ -21,19 +21,11 @@ pub fn main(init: std.process.Init) !void {
 
     var conn = db.connect();
 
-    // Multi-statement scripts (DDL + DML + SELECT) go through exec when there
-    // is no trailing SELECT-only prepare; for demo simplicity, try prepare
-    // first and fall back to exec if prepare fails on multi-statement shapes.
-    var stmt = conn.prepare(sql) catch {
-        conn.exec(sql, .{}) catch |e| {
-            std.debug.print("exec failed: {s}\n", .{@errorName(e)});
-            return e;
-        };
-        std.debug.print("ok (engine {s}, zig-libsql {s})\n", .{
-            libsql.engineVersion(),
-            libsql.version,
-        });
-        return;
+    // Fail closed: propagate prepare errors rather than blindly re-running the
+    // input through exec, which would mask syntax/allocation/database failures.
+    var stmt = conn.prepare(sql) catch |e| {
+        std.debug.print("prepare failed: {s}\n", .{@errorName(e)});
+        return e;
     };
     defer stmt.deinit();
 
@@ -59,6 +51,10 @@ pub fn main(init: std.process.Init) !void {
                 switch (ty) {
                     libsql.column_type.integer => std.debug.print("{d}", .{try row.int(col)}),
                     libsql.column_type.float => std.debug.print("{d}", .{try row.float(col)}),
+                    libsql.column_type.blob => {
+                        const b = (try row.blob(col)) orelse &[_]u8{};
+                        std.debug.print("<blob {d} bytes>", .{b.len});
+                    },
                     else => {
                         const t = (try row.text(col)) orelse "";
                         std.debug.print("{s}", .{t});

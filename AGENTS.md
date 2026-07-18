@@ -9,7 +9,7 @@ scripty, hasky, …). Prefer:
 
 1. **Zig API** as the only consumer surface.
 2. **Zig-compiled C** for the local engine (vendored amalgamation under `vendor/`).
-3. **Pure Zig** for network protocols (Hrana) when remote lands.
+3. **Pure Zig** for network protocols (Hrana over HTTP, landed in Phase 2).
 
 Forbidden as the default path:
 
@@ -46,7 +46,7 @@ expand CI/support claims without an explicit decision.
 **zig-libsql** is a Zig package:
 
 - local SQLite-compatible database (vendored amalgamation)
-- future: remote libSQL via Hrana HTTP
+- remote libSQL via Hrana over HTTP (Phase 2)
 - future: embedded replicas (evaluate pure vs rusty bridge)
 
 It is **not** a reimplementation of the full SQLite VM in Zig (v1).
@@ -69,7 +69,7 @@ Version strings (`build.zig.zon`, `src/root.zig`) must stay in sync.
 | `src/error.zig` | Error set + mapping |
 | `src/c/sqlite.zig` | Minimal explicit `extern` surface |
 | `src/util/path.zig` | Path / URI parsing |
-| `src/backend/remote.zig` | Hrana (stub until Phase 2) |
+| `src/backend/remote.zig` | Hrana over HTTP (Phase 2) |
 | `vendor/` | Pinned amalgamation — integrity in `vendor/VERSION` |
 | `src/main.zig` | Demo CLI only (not library surface) |
 

@@ -4,7 +4,7 @@ Zig adapter for **libSQL** / SQLite-compatible databases, built for solved.gg
 toolchains written in pure(as) Zig (rusty, scripty, hasky, …).
 
 - **Local:** vendored SQLite amalgamation compiled by Zig (not system `libsqlite3`)
-- **Remote:** Hrana client planned (pure Zig) — see [docs/ROADMAP.md](docs/ROADMAP.md)
+- **Remote:** pure Zig **Hrana over HTTP** (JSON `v3/pipeline`) — see [docs/ROADMAP.md](docs/ROADMAP.md)
 - **No cargo** on the default path. If a Rust bridge is ever required, build it
   with [rusty](https://github.com/solvedggorg/rusty).
 
@@ -47,6 +47,27 @@ pub fn example(allocator: std.mem.Allocator) !void {
 }
 ```
 
+### Remote (Hrana HTTP)
+
+```zig
+var db = try libsql.Database.open(allocator, .{
+    .path = "libsql://your-db.turso.io",
+    .auth_token = token, // never log
+    .io = io,            // required for remote
+});
+defer db.deinit();
+var conn = db.connect();
+try conn.exec("create table if not exists t(x int);", .{});
+var stmt = try conn.prepare("select x from t where x = ?1;");
+defer stmt.deinit();
+try stmt.bind(.{42});
+while (try stmt.step()) |row| {
+    _ = try row.int(0);
+}
+```
+
+`libsql://` and `wss://` map to `https://` for the HTTP pipeline.
+
 Add as a dependency via path or `zig fetch` and import module **`zig_libsql`**.
 
 ## Design
@@ -55,7 +76,7 @@ Add as a dependency via path or `zig fetch` and import module **`zig_libsql`**.
 |-------|----------------|
 | Public API | Idiomatic Zig (`Database`, `Connection`, `Statement`) |
 | Local engine | `vendor/sqlite3.c` compiled into the module |
-| Remote | Phase 2 — Hrana over HTTP |
+| Remote | Hrana over HTTP JSON (`src/backend/hrana/`) |
 | Rust | Not default; rusty-built bridge only if unavoidable |
 
 See [AGENTS.md](AGENTS.md) for engineering rules.
