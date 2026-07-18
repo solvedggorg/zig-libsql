@@ -131,11 +131,17 @@ pub const Session = struct {
         self.baton = out.baton;
         out.baton = null;
 
-        // Update base URL if server redirected the stream
+        // Update base URL if the server redirected the stream, but never accept
+        // a redirect that would send the Bearer token to a cleartext origin.
+        // TLS authenticates the response, so an attacker cannot inject a
+        // malicious https base_url without breaking TLS. A redirect we reject is
+        // left owned by `out` and freed by the caller's `out.deinit`.
         if (out.base_url) |new_base| {
-            self.allocator.free(self.base_url);
-            self.base_url = new_base;
-            out.base_url = null;
+            if (acceptableRedirect(self.auth_token, new_base)) {
+                self.allocator.free(self.base_url);
+                self.base_url = new_base;
+                out.base_url = null;
+            }
         }
 
         if (self.baton == null) {
@@ -146,6 +152,14 @@ pub const Session = struct {
         return out;
     }
 };
+
+/// Accept a server-provided `base_url` redirect only when it cannot leak the
+/// auth token: HTTPS is always fine; cleartext HTTP is allowed only when no
+/// token is configured (nothing to expose).
+fn acceptableRedirect(auth_token: ?[]const u8, new_base: []const u8) bool {
+    if (std.mem.startsWith(u8, new_base, "https://")) return true;
+    return auth_token == null and std.mem.startsWith(u8, new_base, "http://");
+}
 
 test "session open maps libsql url" {
     const gpa = std.testing.allocator;

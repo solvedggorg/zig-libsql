@@ -37,6 +37,9 @@ pub const Database = struct {
         switch (parsed.kind) {
             .remote => {
                 const io = opts.io orelse return error.Unsupported;
+                // Fail closed: never send a Bearer token over cleartext transport.
+                if (opts.auth_token != null and path_util.isCleartextRemote(opts.path))
+                    return error.InvalidPath;
                 const session_ptr = allocator.create(remote.Session) catch return error.OutOfMemory;
                 errdefer allocator.destroy(session_ptr);
                 session_ptr.* = try remote.Session.open(io, allocator, opts.path, opts.auth_token);

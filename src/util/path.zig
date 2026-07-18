@@ -75,6 +75,14 @@ test "parse remote" {
     try std.testing.expect(p.kind == .remote);
 }
 
+/// True when a remote open URL uses a cleartext transport (`http://` or `ws://`)
+/// that would expose an auth token in transit. `https://`, `libsql://`, and
+/// `wss://` all map to TLS and are considered secure.
+pub fn isCleartextRemote(url: []const u8) bool {
+    return std.mem.startsWith(u8, url, "http://") or
+        std.mem.startsWith(u8, url, "ws://");
+}
+
 /// Map a remote open URL to an HTTP(S) origin for Hrana over HTTP.
 ///
 /// - `libsql://host/...` → `https://host/...`

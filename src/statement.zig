@@ -103,10 +103,16 @@ pub const Statement = struct {
                 try err.mapRc(rc);
             },
             .remote => {
+                if (idx == 0) return error.Bind;
                 const owned = self.allocator.dupe(u8, text) catch return error.OutOfMemory;
                 errdefer self.allocator.free(owned);
-                try self.bind_storage.append(self.allocator, owned);
-                try self.remoteSet(idx, .{ .text = owned });
+                // Reserve capacity in both collections before mutating either, so
+                // no grow can fail after bind_storage has taken ownership of
+                // `owned` (which would double-free it via deinit).
+                try self.binds.ensureTotalCapacity(self.allocator, idx);
+                try self.bind_storage.ensureUnusedCapacity(self.allocator, 1);
+                self.bind_storage.appendAssumeCapacity(owned);
+                self.remoteSetAssumeCapacity(idx, .{ .text = owned });
             },
         }
     }
@@ -115,20 +121,29 @@ pub const Statement = struct {
         switch (self.kind) {
             .local => {
                 const destructor: ?*const anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, c.SQLITE_TRANSIENT))));
+                // Always pass a non-null data pointer: a null pointer makes a
+                // zero-length blob bind as SQL NULL instead of an empty blob.
+                const data: [*]const u8 = if (blob.len == 0) &[_]u8{} else blob.ptr;
                 const rc = c.sqlite3_bind_blob(
                     self.stmt.?,
                     @intCast(idx),
-                    if (blob.len == 0) null else blob.ptr,
+                    data,
                     @intCast(blob.len),
                     destructor,
                 );
                 try err.mapRc(rc);
             },
             .remote => {
+                if (idx == 0) return error.Bind;
                 const owned = self.allocator.dupe(u8, blob) catch return error.OutOfMemory;
                 errdefer self.allocator.free(owned);
-                try self.bind_storage.append(self.allocator, owned);
-                try self.remoteSet(idx, .{ .blob = owned });
+                // Reserve capacity in both collections before mutating either, so
+                // no grow can fail after bind_storage has taken ownership of
+                // `owned` (which would double-free it via deinit).
+                try self.binds.ensureTotalCapacity(self.allocator, idx);
+                try self.bind_storage.ensureUnusedCapacity(self.allocator, 1);
+                self.bind_storage.appendAssumeCapacity(owned);
+                self.remoteSetAssumeCapacity(idx, .{ .blob = owned });
             },
         }
     }
@@ -149,6 +164,15 @@ pub const Statement = struct {
         while (self.binds.items.len <= i) {
             try self.binds.append(self.allocator, .{ .null = {} });
         }
+        self.binds.items[i] = v;
+    }
+
+    /// Like `remoteSet` but assumes `binds` already has capacity for `idx`
+    /// elements (caller must `ensureTotalCapacity(idx)` first), so it cannot
+    /// fail and cannot leave partially-owned storage behind.
+    fn remoteSetAssumeCapacity(self: *Statement, idx: usize, v: value.Value) void {
+        const i = idx - 1;
+        while (self.binds.items.len <= i) self.binds.appendAssumeCapacity(.{ .null = {} });
         self.binds.items[i] = v;
     }
 
@@ -301,7 +325,78 @@ pub const Statement = struct {
     pub fn parameterCount(self: *Statement) usize {
         return switch (self.kind) {
             .local => @intCast(c.sqlite3_bind_parameter_count(self.stmt.?)),
-            .remote => self.binds.items.len,
+            // Remote statements have no prepared handle to query, so count the
+            // placeholders in the SQL itself rather than reporting how many slots
+            // happen to be bound.
+            .remote => countSqlParameters(self.sql orelse ""),
         };
     }
 };
+
+/// Count positional bind parameters (`?` and `?NNN`) in `sql`, mirroring
+/// SQLite's rule that the parameter count is the largest parameter index used.
+/// String/blob literals, quoted identifiers (`"..."`, `` `...` ``, `[...]`), and
+/// `--` / `/* */` comments are skipped. Named parameters (`:x`, `@x`, `$x`) are
+/// not supported by the remote binder and are intentionally not counted.
+fn countSqlParameters(sql: []const u8) usize {
+    var max_index: usize = 0;
+    var i: usize = 0;
+    while (i < sql.len) {
+        switch (sql[i]) {
+            '\'', '"', '`' => {
+                const q = sql[i];
+                i += 1;
+                while (i < sql.len) : (i += 1) {
+                    if (sql[i] == q) {
+                        if (i + 1 < sql.len and sql[i + 1] == q) {
+                            i += 1; // doubled-quote escape
+                        } else break;
+                    }
+                }
+                i += 1;
+            },
+            '[' => {
+                i += 1;
+                while (i < sql.len and sql[i] != ']') i += 1;
+                i += 1;
+            },
+            '-' => {
+                if (i + 1 < sql.len and sql[i + 1] == '-') {
+                    i += 2;
+                    while (i < sql.len and sql[i] != '\n') i += 1;
+                } else i += 1;
+            },
+            '/' => {
+                if (i + 1 < sql.len and sql[i + 1] == '*') {
+                    i += 2;
+                    while (i + 1 < sql.len and !(sql[i] == '*' and sql[i + 1] == '/')) i += 1;
+                    i += 2;
+                } else i += 1;
+            },
+            '?' => {
+                i += 1;
+                if (i < sql.len and std.ascii.isDigit(sql[i])) {
+                    var n: usize = 0;
+                    while (i < sql.len and std.ascii.isDigit(sql[i])) : (i += 1) {
+                        n = n * 10 + (sql[i] - '0');
+                    }
+                    if (n > max_index) max_index = n;
+                } else {
+                    max_index += 1;
+                }
+            },
+            else => i += 1,
+        }
+    }
+    return max_index;
+}
+
+test "countSqlParameters positional forms" {
+    try std.testing.expectEqual(@as(usize, 0), countSqlParameters("select 1"));
+    try std.testing.expectEqual(@as(usize, 1), countSqlParameters("select ?1"));
+    try std.testing.expectEqual(@as(usize, 2), countSqlParameters("select ?, ?"));
+    try std.testing.expectEqual(@as(usize, 3), countSqlParameters("select ?, ?3"));
+    // Placeholders inside literals/comments/identifiers are ignored.
+    try std.testing.expectEqual(@as(usize, 1), countSqlParameters("select '?', \"?\", ? -- ?\n"));
+    try std.testing.expectEqual(@as(usize, 0), countSqlParameters("select 'a?b' /* ? */"));
+}
