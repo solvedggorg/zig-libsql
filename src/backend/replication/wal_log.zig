@@ -133,6 +133,7 @@ pub const LogOffset = struct {
                 2 => {
                     if (t.wt != .varint) return error.InvalidWireType;
                     const v = try r.readVarint();
+                    if (v > std.math.maxInt(u32)) return error.InvalidWireType;
                     out.wal_flavor = std.enums.fromInt(WalFlavor, @as(u32, @intCast(v)));
                 },
                 else => try r.skip(t.wt),
