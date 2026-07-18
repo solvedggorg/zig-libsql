@@ -21,8 +21,13 @@ Consider vendoring Turso’s **libsql-sqlite3** amalgamation (or equivalent
 single-TU build) when we need local features that stock SQLite lacks, e.g.:
 
 - libSQL-specific SQL extensions (column type changes, etc.)
-- Virtual WAL hooks required for **embedded replica apply**
+- Virtual WAL hooks required for **embedded replica apply** (confirmed by
+  protocol spike: `SqliteInjector` / custom `WalManager` — see
+  `docs/replica-protocol-spike.md`)
 - Other fork-only pragmas used by primary/replica tooling
+
+Until that pin lands, classic embedded replicas on pure stock SQLite are
+**unsupported**; use Phase 4 rusty bridge for a working replica path.
 
 ## Policy
 

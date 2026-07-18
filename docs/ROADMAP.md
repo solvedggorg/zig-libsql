@@ -16,7 +16,7 @@ engine, pure Zig remote (Hrana) — not a cargo wrapper.
 | Batch | **MVP** | Phase 3 — local txn + remote Hrana batch |
 | Remote Hrana HTTP | **MVP** | Phase 2 — JSON `v3/pipeline` |
 | Hrana WebSocket | later | |
-| Embedded replicas | design | `docs/embedded-replicas.md` |
+| Embedded replicas | design + spike | Protocol done (`docs/replica-protocol-spike.md`); code not started |
 | libSQL SQL extensions | deferred | Stay on stock SQLite until needed (`docs/libsql-engine.md`) |
 | System libsqlite3 backend | non-goal | Debug-only option only if ever added |
 | Rust C FFI default | non-goal | Optional bridge only (Phase 4) |
@@ -47,17 +47,23 @@ README, AGENTS, ROADMAP, package scaffold.
 - [x] `Connection.batch` (local transaction; remote Hrana batch + BEGIN/COMMIT)
 - [x] Embedded replica **design** (`docs/embedded-replicas.md`)
 - [x] Engine pin policy (`docs/libsql-engine.md`) — keep SQLite until fork needed
-- [ ] Replica implementation (follow-on after protocol spike)
+- [x] Replica **protocol spike** (`docs/replica-protocol-spike.md`) — classic
+  gRPC-Web page frames; apply needs libSQL WAL inject (not stock SQLite)
+- [ ] Replica **implementation** — next slices:
+  1. **R1 (recommended near-term):** Phase 4 rusty bridge MVP
+     (`Database` dual open + `sync()`, gated `-Denable-rust-bridge`)
+  2. **R2/R3 (long-term pure):** gRPC-Web codecs + libsql engine pin + inject
 
 ### Phase 4 — Optional Rust interop
 
-Only if pure path cannot deliver a required feature:
+Recommended for **first** classic embedded-replica MVP (spike: pure stock
+SQLite cannot apply frames). Also used if other pure-path features cannot land:
 
 ```sh
 rusty init libsql_bridge -lib -y
 ```
 
-Gated build option; documented removal criteria.
+Gated build option; documented removal criteria once pure wire+inject exists.
 
 ## Non-goals
 

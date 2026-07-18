@@ -75,6 +75,7 @@ Version strings (`build.zig.zon`, `src/root.zig`) must stay in sync.
 | `vendor/` | Pinned amalgamation — integrity in `vendor/VERSION` |
 | `src/main.zig` | Demo CLI only (not library surface) |
 | `docs/embedded-replicas.md` | Replica design (not implemented) |
+| `docs/replica-protocol-spike.md` | Classic replica wire/apply spike (done) |
 | `docs/libsql-engine.md` | Engine pin policy |
 
 ---
