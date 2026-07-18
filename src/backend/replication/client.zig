@@ -164,10 +164,9 @@ pub const Client = struct {
         const resp_pb = try http.postUnary(self.io, self.allocator, url, self.headers(), req_pb);
         errdefer self.allocator.free(resp_pb);
 
-        const frames = wal_log.Frames.decodeOwned(self.allocator, resp_pb) catch {
-            self.allocator.free(resp_pb);
-            return error.Sql;
-        };
+        // On decode failure the active `errdefer` above frees `resp_pb`; do not
+        // free it again here or it would double-free.
+        const frames = wal_log.Frames.decodeOwned(self.allocator, resp_pb) catch return error.Sql;
 
         return .{
             .allocator = self.allocator,

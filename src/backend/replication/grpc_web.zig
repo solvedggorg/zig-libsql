@@ -83,11 +83,9 @@ pub fn decodeResponse(allocator: std.mem.Allocator, body: []const u8) FrameError
 
     const parsed = parseTrailer(trailer);
     if (parsed.status != 0) {
-        allocator.free(msg_buf.items);
-        // Keep trailer so callers can inspect grpc-message via a dedicated error path.
-        // Free trailer here and surface GrpcStatus; callers that need the message
-        // should use decodeResponseDetailed or inspect before free — for our client
-        // we re-parse from body on error. Simpler: return error after free.
+        // `msg_buf` is released by the active `errdefer msg_buf.deinit(allocator)`;
+        // freeing it explicitly here would double-free. We own `trailer`
+        // (ownership was taken from `trailer_owned` above), so free it here.
         allocator.free(trailer);
         return error.GrpcStatus;
     }
