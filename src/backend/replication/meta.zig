@@ -80,14 +80,18 @@ pub fn save(io: Io, allocator: std.mem.Allocator, db_path: []const u8, meta: Wal
     const path = try indexPathAlloc(allocator, db_path);
     defer allocator.free(path);
 
-    const tmp = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
-    defer allocator.free(tmp);
-
     var buf: [meta_size]u8 = undefined;
     meta.encode(&buf);
 
-    Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = &buf }) catch return error.Io;
-    Io.Dir.rename(Io.Dir.cwd(), tmp, Io.Dir.cwd(), path, io) catch return error.Io;
+    // Write to a randomly named, exclusively created (`O_EXCL`) temp file beside
+    // the target, then atomically rename it into place. Avoids the predictable
+    // `{path}.tmp` name, which a local attacker could pre-create as a symlink to
+    // redirect the write. `deinit` removes the temp file on any failure.
+    var af = Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = true }) catch return error.Io;
+    defer af.deinit(io);
+
+    af.file.writePositionalAll(io, &buf, 0) catch return error.Io;
+    af.replace(io) catch return error.Io;
 }
 
 test "wal index meta round-trip" {

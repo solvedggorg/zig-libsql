@@ -17,6 +17,8 @@ pub const FrameError = error{
     Truncated,
     Overflow,
     MissingTrailer,
+    /// Trailer frame present but carried no `grpc-status` line.
+    MissingStatus,
     GrpcStatus,
     OutOfMemory,
 };
@@ -80,20 +82,21 @@ pub fn decodeResponse(allocator: std.mem.Allocator, body: []const u8) FrameError
     if (!saw_trailer) return error.MissingTrailer;
     const trailer = trailer_owned.?;
     trailer_owned = null;
+    // Ownership transferred out of `trailer_owned`; keep an errdefer so any later
+    // failure (unwrap, toOwnedSlice) frees it instead of leaking. `msg_buf` is
+    // covered by its own errdefer above, so no explicit frees here would ever
+    // double-free.
+    errdefer allocator.free(trailer);
 
     const parsed = parseTrailer(trailer);
-    if (parsed.status != 0) {
-        // `msg_buf` is released by the active `errdefer msg_buf.deinit(allocator)`;
-        // freeing it explicitly here would double-free. We own `trailer`
-        // (ownership was taken from `trailer_owned` above), so free it here.
-        allocator.free(trailer);
-        return error.GrpcStatus;
-    }
+    // Fail closed on a trailer that omits grpc-status rather than treating it as OK.
+    const status = parsed.status orelse return error.MissingStatus;
+    if (status != 0) return error.GrpcStatus;
 
     return .{
         .message = try msg_buf.toOwnedSlice(allocator),
         .trailer = trailer,
-        .status = parsed.status,
+        .status = status,
         .status_message = parsed.message,
     };
 }
@@ -129,23 +132,30 @@ pub fn decodeResponseAllowStatus(allocator: std.mem.Allocator, body: []const u8)
     if (!saw_trailer) return error.MissingTrailer;
     const trailer = trailer_owned.?;
     trailer_owned = null;
+    // See `decodeResponse`: keep an errdefer for the now-owned trailer so a
+    // failure below frees it instead of leaking.
+    errdefer allocator.free(trailer);
+
     const parsed = parseTrailer(trailer);
+    // Even in the allow-status path, a trailer with no grpc-status is malformed.
+    const status = parsed.status orelse return error.MissingStatus;
 
     return .{
         .message = try msg_buf.toOwnedSlice(allocator),
         .trailer = trailer,
-        .status = parsed.status,
+        .status = status,
         .status_message = parsed.message,
     };
 }
 
 const TrailerFields = struct {
-    status: u32,
+    /// `null` when the trailer carried no `grpc-status` line at all.
+    status: ?u32,
     message: []const u8,
 };
 
 fn parseTrailer(trailer: []const u8) TrailerFields {
-    var status: u32 = 0;
+    var status: ?u32 = null;
     var message: []const u8 = "";
     var rest = trailer;
     while (rest.len > 0) {
@@ -249,4 +259,21 @@ test "missing trailer" {
     try body.appendSlice(gpa, &len_buf);
     try body.appendSlice(gpa, payload);
     try std.testing.expectError(error.MissingTrailer, decodeResponse(gpa, body.items));
+}
+
+test "trailer without grpc-status is rejected" {
+    const gpa = std.testing.allocator;
+    // Trailer frame present but carrying only grpc-message: must not be treated
+    // as a successful (status 0) response by either decoder.
+    const trailer_body = "grpc-message: something\r\n";
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(gpa);
+    try body.append(gpa, trailer_flag);
+    var len_buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &len_buf, @intCast(trailer_body.len), .big);
+    try body.appendSlice(gpa, &len_buf);
+    try body.appendSlice(gpa, trailer_body);
+
+    try std.testing.expectError(error.MissingStatus, decodeResponse(gpa, body.items));
+    try std.testing.expectError(error.MissingStatus, decodeResponseAllowStatus(gpa, body.items));
 }

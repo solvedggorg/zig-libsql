@@ -125,18 +125,25 @@ pub const Client = struct {
 
         const decoded = wal_log.HelloResponse.decode(resp_pb) catch return error.Sql;
 
-        if (decoded.session_token.len != 0) {
-            if (!wal_log.sessionTokenLooksValid(decoded.session_token)) return error.Sql;
-            const st = self.allocator.dupe(u8, decoded.session_token) catch return error.OutOfMemory;
-            if (self.session_token) |old| self.allocator.free(old);
-            self.session_token = st;
+        // A valid Hello carries both a session token and a log id. Reject a
+        // response missing either (fail closed) so we never combine a fresh
+        // Hello with stale session state. Duplicate both before freeing or
+        // replacing either old value, so the swap is all-or-nothing.
+        if (decoded.session_token.len == 0 or
+            !wal_log.sessionTokenLooksValid(decoded.session_token) or
+            decoded.log_id.len == 0)
+        {
+            return error.Sql;
         }
 
-        if (decoded.log_id.len != 0) {
-            const id = self.allocator.dupe(u8, decoded.log_id) catch return error.OutOfMemory;
-            if (self.log_id) |old| self.allocator.free(old);
-            self.log_id = id;
-        }
+        const st = self.allocator.dupe(u8, decoded.session_token) catch return error.OutOfMemory;
+        errdefer self.allocator.free(st);
+        const id = self.allocator.dupe(u8, decoded.log_id) catch return error.OutOfMemory;
+
+        if (self.session_token) |old| self.allocator.free(old);
+        if (self.log_id) |old| self.allocator.free(old);
+        self.session_token = st;
+        self.log_id = id;
 
         self.current_replication_index = decoded.current_replication_index;
 
@@ -219,8 +226,20 @@ pub const Client = struct {
 
             for (batch.frames) |rpc| {
                 const pf = rpc.parsePageFrame() catch return error.Sql;
+                const frame_no = pf.header.frame_no;
+                // Reject gaps and duplicates: each frame must be exactly the one
+                // we asked for. On a fresh pull (`offset == 0` means "from the
+                // first frame") frame numbers are 1-based, so accept the server's
+                // first frame_no as the baseline instead of requiring it to be 0.
+                if (offset == 0) {
+                    if (frame_no == 0) return error.Sql;
+                } else if (frame_no != offset) {
+                    return error.Sql;
+                }
+                // Guard against a server-provided maxInt(u64) overflowing offset.
+                const next = std.math.add(u64, frame_no, 1) catch return error.Sql;
                 list.append(self.allocator, pf) catch return error.OutOfMemory;
-                offset = pf.header.frame_no + 1;
+                offset = next;
             }
 
             if (self.current_replication_index) |primary| {
