@@ -115,6 +115,9 @@ pub const Statement = struct {
                 const owned = self.allocator.dupe(u8, text) catch return error.OutOfMemory;
                 errdefer self.allocator.free(owned);
                 try self.bind_storage.append(self.allocator, owned);
+                // Undo the append if the set below fails, so `owned` is freed
+                // exactly once (here) and not again by deinit.
+                errdefer _ = self.bind_storage.pop();
                 try self.remoteSet(idx, .{ .text = owned });
             },
         }
@@ -136,6 +139,9 @@ pub const Statement = struct {
                 const owned = self.allocator.dupe(u8, blob) catch return error.OutOfMemory;
                 errdefer self.allocator.free(owned);
                 try self.bind_storage.append(self.allocator, owned);
+                // Undo the append if the set below fails, so `owned` is freed
+                // exactly once (here) and not again by deinit.
+                errdefer _ = self.bind_storage.pop();
                 try self.remoteSet(idx, .{ .blob = owned });
             },
         }
@@ -175,6 +181,9 @@ pub const Statement = struct {
                 const owned = self.allocator.dupe(u8, text) catch return error.OutOfMemory;
                 errdefer self.allocator.free(owned);
                 try self.bind_storage.append(self.allocator, owned);
+                // Undo the append if the set below fails, so `owned` is freed
+                // exactly once (here) and not again by deinit.
+                errdefer _ = self.bind_storage.pop();
                 try self.remoteNamedSet(name, .{ .text = owned });
             },
         }
@@ -190,6 +199,9 @@ pub const Statement = struct {
                 const owned = self.allocator.dupe(u8, blob) catch return error.OutOfMemory;
                 errdefer self.allocator.free(owned);
                 try self.bind_storage.append(self.allocator, owned);
+                // Undo the append if the set below fails, so `owned` is freed
+                // exactly once (here) and not again by deinit.
+                errdefer _ = self.bind_storage.pop();
                 try self.remoteNamedSet(name, .{ .blob = owned });
             },
         }
@@ -249,6 +261,9 @@ pub const Statement = struct {
         const name_owned = self.allocator.dupe(u8, name) catch return error.OutOfMemory;
         errdefer self.allocator.free(name_owned);
         try self.name_storage.append(self.allocator, name_owned);
+        // Undo the append if the named_binds append fails, so `name_owned` is
+        // freed exactly once (here) and not again by deinit.
+        errdefer _ = self.name_storage.pop();
         try self.named_binds.append(self.allocator, .{ .name = name_owned, .value = v });
     }
 
@@ -446,10 +461,13 @@ pub const Statement = struct {
         self.row_index = 0;
     }
 
-    pub fn parameterCount(self: *Statement) usize {
+    pub fn parameterCount(self: *Statement) err.Error!usize {
         return switch (self.kind) {
             .local => @intCast(c.sqlite3_bind_parameter_count(self.stmt.?)),
-            .remote => self.binds.items.len + self.named_binds.items.len,
+            // Remote statements do not expose the SQL's declared parameter count;
+            // the bind lists only reflect what has been bound so far, which is a
+            // different quantity. Fail closed rather than return a misleading value.
+            .remote => error.Unsupported,
         };
     }
 };

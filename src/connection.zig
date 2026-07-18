@@ -106,22 +106,13 @@ pub const Connection = struct {
         switch (self.kind) {
             .local => {
                 try self.begin();
-                errdefer self.rollback() catch {};
-
-                var total_affected: i64 = 0;
-                for (steps) |step| {
-                    var stmt = try self.prepare(step.sql);
-                    defer stmt.deinit();
-                    for (step.args, 0..) |a, i| {
-                        try stmt.bindValue(i + 1, a);
-                    }
-                    for (step.named_args) |na| {
-                        try stmt.bindNamedValue(na.name, na.value);
-                    }
-                    try stmt.execute();
-                    total_affected += self.changes();
-                }
-                try self.commit();
+                const total_affected = self.runLocalSteps(steps) catch |e| {
+                    // Surface a rollback failure rather than swallowing it: if the
+                    // rollback itself fails the connection is in an unknown state,
+                    // and the caller must know. Otherwise report the original error.
+                    self.rollback() catch |re| return re;
+                    return e;
+                };
                 return .{
                     .steps_run = steps.len,
                     .total_affected = total_affected,
@@ -129,6 +120,26 @@ pub const Connection = struct {
             },
             .remote => return try self.session.?.batch(steps),
         }
+    }
+
+    /// Execute each batch step and COMMIT, returning the total affected rows.
+    /// On any error the transaction is left open for the caller to roll back.
+    fn runLocalSteps(self: *Connection, steps: []const batch_mod.Step) err.Error!i64 {
+        var total_affected: i64 = 0;
+        for (steps) |step| {
+            var stmt = try self.prepare(step.sql);
+            defer stmt.deinit();
+            for (step.args, 0..) |a, i| {
+                try stmt.bindValue(i + 1, a);
+            }
+            for (step.named_args) |na| {
+                try stmt.bindNamedValue(na.name, na.value);
+            }
+            try stmt.execute();
+            total_affected += self.changes();
+        }
+        try self.commit();
+        return total_affected;
     }
 
     pub fn begin(self: *Connection) err.Error!void {

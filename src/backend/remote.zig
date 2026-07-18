@@ -71,8 +71,12 @@ pub const Session = struct {
         }
         const body = try pipeline.buildCloseBody(self.allocator, self.baton);
         defer self.allocator.free(body);
-        _ = self.roundTrip(body) catch {};
+        var out = try self.roundTrip(body);
+        defer out.deinit(self.allocator);
+        // The close request was sent; mark the stream closed regardless, then
+        // surface a server-reported failure instead of silently swallowing it.
         self.closed = true;
+        if (out.failed) return error.Sql;
     }
 
     /// Execute multi-statement SQL; rows discarded (Hrana `sequence`).
@@ -97,22 +101,14 @@ pub const Session = struct {
         const body = try pipeline.buildExecuteBody(self.allocator, self.baton, sql, args, named_args, want_rows);
         defer self.allocator.free(body);
         var out = try self.roundTrip(body);
-        const stmt = out.stmt orelse {
-            const failed = out.failed;
-            out.stmt = null;
-            out.deinit(self.allocator);
-            if (failed) return error.Sql;
-            return .{
-                .cols = try self.allocator.alloc([]u8, 0),
-                .rows = try self.allocator.alloc([]@import("hrana/value_json.zig").Owned, 0),
-                .affected_row_count = 0,
-                .last_insert_rowid = 0,
-            };
-        };
+        defer out.deinit(self.allocator);
+        if (out.failed) return error.Sql;
+        // A successful `execute` always carries a statement result; a missing one
+        // is a protocol violation, not an empty success.
+        const stmt = out.stmt orelse return error.Sql;
         out.stmt = null;
         self.last_affected = @intCast(stmt.affected_row_count);
         self.last_insert_rowid = stmt.last_insert_rowid;
-        out.deinit(self.allocator);
         return stmt;
     }
 
@@ -148,12 +144,18 @@ pub const Session = struct {
         defer self.allocator.free(resp_body);
 
         var out = try pipeline.parsePipelineResponse(self.allocator, resp_body);
+        errdefer out.deinit(self.allocator);
 
         if (self.baton) |old| self.allocator.free(old);
         self.baton = out.baton;
         out.baton = null;
 
         if (out.base_url) |new_base| {
+            // Only honor a base_url override that stays on the same origin. A
+            // server-chosen cross-origin value would redirect subsequent stream
+            // requests (which still carry the bearer token) to an arbitrary
+            // host: SSRF plus token exfiltration. Fail closed instead.
+            if (!sameOrigin(self.base_url, new_base)) return error.Sql;
             self.allocator.free(self.base_url);
             self.base_url = new_base;
             out.base_url = null;
@@ -166,6 +168,24 @@ pub const Session = struct {
         return out;
     }
 };
+
+/// True when both URLs share the same `scheme://authority` origin (case-insensitive).
+fn sameOrigin(a: []const u8, b: []const u8) bool {
+    const oa = originOf(a) orelse return false;
+    const ob = originOf(b) orelse return false;
+    return std.ascii.eqlIgnoreCase(oa, ob);
+}
+
+/// Return the `scheme://authority` prefix of a URL (no path/query/fragment), or
+/// null when the input has no `scheme://` separator.
+fn originOf(url: []const u8) ?[]const u8 {
+    const sep = std.mem.indexOf(u8, url, "://") orelse return null;
+    const authority_start = sep + 3;
+    if (authority_start > url.len) return null;
+    const rest = url[authority_start..];
+    const off = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
+    return url[0 .. authority_start + off];
+}
 
 test "session open maps libsql url" {
     const gpa = std.testing.allocator;
@@ -188,4 +208,14 @@ test "session allows plaintext http without token" {
     var s = try Session.open(io, gpa, "http://db.example.com", null);
     defer s.deinit();
     try std.testing.expectEqualStrings("http://db.example.com", s.base_url);
+}
+
+test "sameOrigin accepts same origin, rejects cross-origin" {
+    // Same origin (path differences ignored, host case-insensitive).
+    try std.testing.expect(sameOrigin("https://db.example.com", "https://db.example.com/v3"));
+    try std.testing.expect(sameOrigin("https://DB.Example.com", "https://db.example.com"));
+    // Different host, scheme, or port are cross-origin.
+    try std.testing.expect(!sameOrigin("https://db.example.com", "https://evil.example.com"));
+    try std.testing.expect(!sameOrigin("https://db.example.com", "http://db.example.com"));
+    try std.testing.expect(!sameOrigin("https://db.example.com", "https://db.example.com:8443"));
 }

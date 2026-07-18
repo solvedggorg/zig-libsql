@@ -449,7 +449,11 @@ fn parseStmtResult(allocator: std.mem.Allocator, v: std.json.Value) err.Error!St
                 while (i < filled) : (i += 1) owned_row[i].deinit(allocator);
             }
             for (cells.items, 0..) |cell, i| {
-                owned_row[i] = value_json.Owned.fromJson(allocator, cell) catch return error.Sql;
+                // Propagate allocation failures unchanged; only decode errors map to Sql.
+                owned_row[i] = value_json.Owned.fromJson(allocator, cell) catch |e| switch (e) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.Sql,
+                };
                 filled = i + 1;
             }
             try rows.append(allocator, owned_row);

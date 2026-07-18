@@ -90,7 +90,9 @@ Link Turso’s C/Rust core only when `-Denable-rust-bridge=true`.
 2. Document frame format, auth, and conflict behavior.
 3. Decide write path: local apply + push vs primary-only writes.
 4. Define crash recovery (partial apply must not corrupt local file).
-5. Fail closed if `url` set without `io` / token (already pattern for remote).
+5. Fail closed if `url` is set without `io` (already the pattern for remote). A
+   missing token is currently accepted (`auth_token = null`); requiring a token
+   for replicas is a future replica-policy decision, not today's behavior.
 
 ## Security
 

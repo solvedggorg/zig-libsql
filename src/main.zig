@@ -21,6 +21,22 @@ pub fn main(init: std.process.Init) !void {
 
     var conn = db.connect();
 
+    // A local prepare compiles only the first statement and silently drops the
+    // remainder (sqlite3_prepare_v2's tail is ignored), so a multi-statement
+    // script would run only its first statement. Detect that up front and route
+    // the whole script through exec, which executes every statement.
+    if (hasTrailingStatement(sql)) {
+        conn.exec(sql, .{}) catch |e| {
+            std.debug.print("exec failed: {s}\n", .{@errorName(e)});
+            return e;
+        };
+        std.debug.print("ok (engine {s}, zig-libsql {s})\n", .{
+            libsql.engineVersion(),
+            libsql.version,
+        });
+        return;
+    }
+
     // Multi-statement scripts (DDL + DML + SELECT) go through exec when there
     // is no trailing SELECT-only prepare; for demo simplicity, try prepare
     // first and fall back to exec if prepare fails on multi-statement shapes.
@@ -78,6 +94,62 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
+/// True when `sql` contains a further statement after the first top-level `;`.
+/// Quote- and comment-aware so that semicolons inside string literals, quoted
+/// identifiers, or comments are not treated as statement separators, and a
+/// trailing comment / whitespace after the final statement does not count.
+fn hasTrailingStatement(sql: []const u8) bool {
+    var i: usize = 0;
+    var seen_semicolon = false;
+    while (i < sql.len) : (i += 1) {
+        const ch = sql[i];
+        switch (ch) {
+            '\'', '"', '`' => {
+                // Skip a quoted string / identifier; a doubled quote escapes.
+                const q = ch;
+                i += 1;
+                while (i < sql.len) : (i += 1) {
+                    if (sql[i] == q) {
+                        if (i + 1 < sql.len and sql[i + 1] == q) {
+                            i += 1;
+                        } else break;
+                    }
+                }
+            },
+            '-' => {
+                if (i + 1 < sql.len and sql[i + 1] == '-') {
+                    i += 2;
+                    while (i < sql.len and sql[i] != '\n') : (i += 1) {}
+                }
+            },
+            '/' => {
+                if (i + 1 < sql.len and sql[i + 1] == '*') {
+                    i += 2;
+                    while (i + 1 < sql.len and !(sql[i] == '*' and sql[i + 1] == '/')) : (i += 1) {}
+                    i += 1; // skip closing '/'
+                }
+            },
+            ';' => seen_semicolon = true,
+            else => {
+                // Any non-whitespace token after the first separator is a
+                // second statement to run.
+                if (seen_semicolon and !std.ascii.isWhitespace(ch)) return true;
+            },
+        }
+    }
+    return false;
+}
+
 test "cli module loads" {
     try std.testing.expect(libsql.version.len > 0);
+}
+
+test "hasTrailingStatement detects multi-statement scripts" {
+    try std.testing.expect(!hasTrailingStatement("select 1 as n;"));
+    try std.testing.expect(!hasTrailingStatement("select 1 as n"));
+    try std.testing.expect(!hasTrailingStatement("select 1;   "));
+    try std.testing.expect(!hasTrailingStatement("select 1; -- trailing comment"));
+    try std.testing.expect(!hasTrailingStatement("select ';' as s;"));
+    try std.testing.expect(hasTrailingStatement("create table t(a); insert into t values(1);"));
+    try std.testing.expect(hasTrailingStatement("select 1; select 2"));
 }

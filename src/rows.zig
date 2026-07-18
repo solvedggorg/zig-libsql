@@ -113,7 +113,9 @@ pub const Row = struct {
                 if (self.remote_col_names) |names| {
                     if (col < names.len) return names[col];
                 }
-                return "";
+                // Fail closed: a missing column name is an error, not an empty
+                // string masquerading as a valid (unnamed) column.
+                return error.Sql;
             },
         };
     }
