@@ -14,6 +14,7 @@ pub const DecodeError = error{
     Truncated,
     Overflow,
     InvalidWireType,
+    InvalidFieldNumber,
     InvalidUtf8,
 };
 
@@ -50,6 +51,7 @@ pub fn writeBytesField(w: *std.ArrayList(u8), allocator: std.mem.Allocator, fiel
 }
 
 pub fn writeStringField(w: *std.ArrayList(u8), allocator: std.mem.Allocator, field: u32, s: []const u8) !void {
+    if (!std.unicode.utf8ValidateSlice(s)) return error.InvalidUtf8;
     try writeBytesField(w, allocator, field, s);
 }
 
@@ -77,6 +79,7 @@ pub const Reader = struct {
             if (self.i >= self.data.len) return error.Truncated;
             const b = self.data[self.i];
             self.i += 1;
+            if (n == 9 and b > 1) return error.Overflow;
             result |= @as(u64, b & 0x7f) << shift;
             if ((b & 0x80) == 0) return result;
             const next: u16 = @as(u16, shift) + 7;
@@ -90,7 +93,10 @@ pub const Reader = struct {
         const t = try self.readVarint();
         const wt_n: u3 = @truncate(t & 0x7);
         const wt = std.enums.fromInt(WireType, wt_n) orelse return error.InvalidWireType;
-        const field: u32 = @intCast(t >> 3);
+        const field_value = t >> 3;
+        if (field_value == 0 or field_value > 0x1fffffff)
+            return error.InvalidFieldNumber;
+        const field: u32 = @intCast(field_value);
         return .{ .field = field, .wt = wt };
     }
 

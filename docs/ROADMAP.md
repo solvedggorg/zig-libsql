@@ -50,7 +50,8 @@ README, AGENTS, ROADMAP, package scaffold.
 - [x] Replica **protocol spike** (`docs/replica-protocol-spike.md`) — classic
   gRPC-Web page frames; apply needs libSQL WAL inject (not stock SQLite)
 - [ ] Replica **implementation** — next slices:
-  1. **R1 (scaffold):** Phase 4 rusty bridge — see `docs/rust-bridge.md`
+  1. **R1 (scaffold):** Phase 4 rusty bridge — required for libSQL WAL
+     injection unavailable in stock SQLite; see `docs/rust-bridge.md`
      (`OpenOptions.sync_url` + `Database.sync()`, gated; blocked on rusty/libsql build)
   2. **R2 (in progress):** pure Zig wire codecs — `src/backend/replication/`
      (frame header, wal_log protobuf, client_wal_index meta; no transport/inject)

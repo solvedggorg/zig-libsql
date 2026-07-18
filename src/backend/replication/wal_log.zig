@@ -8,7 +8,7 @@ const std = @import("std");
 const pb = @import("pb.zig");
 const frame_mod = @import("frame.zig");
 
-pub const DecodeError = pb.DecodeError || error{OutOfMemory};
+pub const DecodeError = pb.DecodeError || error{ OutOfMemory, InvalidWalFlavor };
 
 pub const WalFlavor = enum(u32) {
     sqlite = 0,
@@ -58,7 +58,7 @@ pub const HelloResponse = struct {
     /// Raw embedded `DatabaseConfig` message bytes (field 6), if present.
     config_raw: []const u8 = "",
 
-    pub fn encode(self: HelloResponse, allocator: std.mem.Allocator) error{OutOfMemory}![]u8 {
+    pub fn encode(self: HelloResponse, allocator: std.mem.Allocator) error{ OutOfMemory, InvalidUtf8 }![]u8 {
         var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(allocator);
         if (self.generation_id.len != 0) try pb.writeStringField(&buf, allocator, 1, self.generation_id);
@@ -80,6 +80,7 @@ pub const HelloResponse = struct {
                 1 => {
                     if (t.wt != .len) return error.InvalidWireType;
                     out.generation_id = try r.readLen();
+                    if (!std.unicode.utf8ValidateSlice(out.generation_id)) return error.InvalidUtf8;
                 },
                 2 => {
                     if (t.wt != .varint) return error.InvalidWireType;
@@ -88,6 +89,7 @@ pub const HelloResponse = struct {
                 3 => {
                     if (t.wt != .len) return error.InvalidWireType;
                     out.log_id = try r.readLen();
+                    if (!std.unicode.utf8ValidateSlice(out.log_id)) return error.InvalidUtf8;
                 },
                 4 => {
                     if (t.wt != .len) return error.InvalidWireType;
@@ -134,7 +136,10 @@ pub const LogOffset = struct {
                     if (t.wt != .varint) return error.InvalidWireType;
                     const v = try r.readVarint();
                     if (v > std.math.maxInt(u32)) return error.InvalidWireType;
-                    out.wal_flavor = std.enums.fromInt(WalFlavor, @as(u32, @intCast(v)));
+                    out.wal_flavor = std.enums.fromInt(
+                        WalFlavor,
+                        @as(u32, @intCast(v)),
+                    ) orelse return error.InvalidWalFlavor;
                 },
                 else => try r.skip(t.wt),
             }
