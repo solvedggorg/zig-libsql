@@ -158,7 +158,10 @@ pub fn postUnary(
     var raw = try postRaw(io, allocator, url, headers, protobuf_request);
     defer raw.deinit();
 
-    var dec = grpc_web.decodeResponseAllowStatus(allocator, raw.body) catch return error.Sql;
+    var dec = grpc_web.decodeResponseAllowStatus(allocator, raw.body) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Sql,
+    };
     defer dec.deinit(allocator);
 
     if (dec.status != 0) return mapGrpcStatus(dec.status_message);
@@ -179,7 +182,10 @@ pub fn postStream(
     var raw = try postRaw(io, allocator, url, headers, protobuf_request);
     defer raw.deinit();
 
-    var dec = grpc_web.decodeStreamResponseAllowStatus(allocator, raw.body) catch return error.Sql;
+    var dec = grpc_web.decodeStreamResponseAllowStatus(allocator, raw.body) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Sql,
+    };
     // On error paths below, free all stream buffers. On success we steal
     // `messages` and free only the trailer, so disarm before returning OK.
     errdefer dec.deinit(allocator);

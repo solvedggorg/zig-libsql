@@ -275,7 +275,17 @@ pub const Client = struct {
                     // Snapshot counts as this loop iteration's batch budget.
                     var snap = try self.snapshot(offset);
                     defer snap.deinit();
-                    if (snap.frames.len == 0) break;
+                    if (snap.frames.len == 0) {
+                        // Fail closed: an empty snapshot is only acceptable when
+                        // the replica is provably caught up to the primary.
+                        const caught_up = if (self.current_replication_index) |primary|
+                            (offset == 0 and primary == 0) or
+                                (offset > 0 and offset - 1 >= primary)
+                        else
+                            false;
+                        if (!caught_up) return error.Sql;
+                        break;
+                    }
                     for (snap.frames) |pf| {
                         try appendFrameWithContinuity(&list, self.allocator, pf, &offset);
                     }
