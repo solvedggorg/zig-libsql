@@ -90,7 +90,7 @@ Add as a dependency via path or `zig fetch` and import module **`zig_libsql`**.
 | Local engine | `vendor/sqlite3.c` compiled into the module |
 | Remote | Hrana over HTTP JSON (`src/backend/hrana/`) |
 | Replicas | Design + protocol spike — `docs/embedded-replicas.md`, `docs/replica-protocol-spike.md` |
-| Rust | Not default; rusty-built bridge only if unavoidable |
+| Rust | Optional rusty cdylib for classic replica **sync** — `docs/rust-bridge.md` (`-Denable-rust-bridge`) |
 
 See [AGENTS.md](AGENTS.md) for engineering rules.
 

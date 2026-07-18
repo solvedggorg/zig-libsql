@@ -24,6 +24,7 @@ test {
     _ = @import("database.zig");
     _ = @import("batch.zig");
     _ = @import("backend/remote.zig");
+    _ = @import("backend/bridge.zig");
     _ = @import("backend/hrana/value_json.zig");
     _ = @import("backend/hrana/pipeline.zig");
     _ = @import("backend/hrana/http.zig");

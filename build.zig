@@ -4,6 +4,21 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const enable_rust_bridge = b.option(
+        bool,
+        "enable-rust-bridge",
+        "Load rusty-built libsql_bridge cdylib for classic embedded replica sync",
+    ) orelse false;
+    const rust_bridge_lib = b.option(
+        []const u8,
+        "rust-bridge-lib",
+        "Path to liblibsql_bridge shared library (empty = platform default name / loader path)",
+    ) orelse "";
+
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "enable_rust_bridge", enable_rust_bridge);
+    build_options.addOption([]const u8, "rust_bridge_lib", rust_bridge_lib);
+
     const sqlite_flags = [_][]const u8{
         "-std=c99",
         // Thread-safe default (matches multi-threaded Zig consumers).
@@ -33,6 +48,11 @@ pub fn build(b: *std.Build) void {
         .flags = &sqlite_flags,
     });
     mod.addIncludePath(b.path("vendor"));
+    mod.addOptions("build_options", build_options);
+    // DynLib for optional rust bridge.
+    if (enable_rust_bridge) {
+        mod.link_libcpp = false;
+    }
 
     const exe = b.addExecutable(.{
         .name = "zig_libsql",
@@ -74,10 +94,18 @@ pub fn build(b: *std.Build) void {
         .flags = &sqlite_flags,
     });
     test_mod.addIncludePath(b.path("vendor"));
+    test_mod.addOptions("build_options", build_options);
 
     const mod_tests = b.addTest(.{
         .root_module = test_mod,
     });
+    // DynLib needs libdl on Linux.
+    if (enable_rust_bridge and target.result.os.tag == .linux) {
+        mod_tests.root_module.linkSystemLibrary("dl", .{});
+        // Also for the library module consumers — link on the module used by tests.
+        test_mod.linkSystemLibrary("dl", .{});
+        mod.linkSystemLibrary("dl", .{});
+    }
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
     const exe_tests = b.addTest(.{
@@ -88,4 +116,11 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run library and CLI tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    // --- rusty bridge (optional) ---
+    const bridge_step = b.step("bridge", "Build libsql_bridge cdylib with rusty");
+    const rusty_build = b.addSystemCommand(&.{ "rusty", "build" });
+    rusty_build.setCwd(b.path("bridge"));
+    rusty_build.setEnvironmentVariable("CARGO_TERM_COLOR", "always");
+    bridge_step.dependOn(&rusty_build.step);
 }
