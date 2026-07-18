@@ -16,7 +16,7 @@ engine, pure Zig remote (Hrana) — not a cargo wrapper.
 | Batch | **MVP** | Phase 3 — local txn + remote Hrana batch |
 | Remote Hrana HTTP | **MVP** | Phase 2 — JSON `v3/pipeline` |
 | Hrana WebSocket | later | |
-| Embedded replicas | design + spike + R1 bridge | Protocol done; rusty cdylib sync gated (`docs/rust-bridge.md`) |
+| Embedded replicas | design + spike + R1 + R2.1 pull | Protocol + pure Zig gRPC-Web pull (no inject); rusty sync gated (`docs/rust-bridge.md`) |
 | libSQL SQL extensions | deferred | Stay on stock SQLite until needed (`docs/libsql-engine.md`) |
 | System libsqlite3 backend | non-goal | Debug-only option only if ever added |
 | Rust C FFI default | non-goal | Optional bridge only (Phase 4) |
@@ -53,9 +53,12 @@ README, AGENTS, ROADMAP, package scaffold.
   1. **R1 (scaffold):** Phase 4 rusty bridge — required for libSQL WAL
      injection unavailable in stock SQLite; see `docs/rust-bridge.md`
      (`OpenOptions.sync_url` + `Database.sync()`, gated; blocked on rusty/libsql build)
-  2. **R2 (in progress):** pure Zig wire codecs — `src/backend/replication/`
-     (frame header, wal_log protobuf, client_wal_index meta; no transport/inject)
-  3. **R3 (later):** gRPC-Web transport + libsql engine pin + inject
+  2. **R2 ✅:** pure Zig wire codecs — `src/backend/replication/`
+     (frame header, wal_log protobuf, client_wal_index meta)
+  3. **R2.1 ✅:** gRPC-Web unary pull — framing + HTTPS `Hello` /
+     `BatchLogEntries` + meta load/save (`docs/replica-wire-r2.md`);
+     **no** public pure `Database.sync` / inject
+  4. **R3 (later):** Snapshot stream + libsql engine pin + inject → pure sync
 
 ### Phase 4 — Optional Rust interop
 

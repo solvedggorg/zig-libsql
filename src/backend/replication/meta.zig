@@ -5,6 +5,7 @@
 //! File name next to the DB: `{basename}-client_wal_index`.
 
 const std = @import("std");
+const Io = std.Io;
 
 pub const meta_size: usize = 32;
 
@@ -45,6 +46,50 @@ pub fn indexPathAlloc(allocator: std.mem.Allocator, db_path: []const u8) error{O
     return std.fmt.allocPrint(allocator, "{s}/{s}-client_wal_index", .{ dir, base });
 }
 
+pub const IoError = error{
+    OutOfMemory,
+    /// File present but wrong size / unreadable.
+    InvalidMeta,
+    /// Filesystem failure (permission, I/O, rename, …).
+    Io,
+};
+
+/// Load `{db}-client_wal_index` if it exists.
+///
+/// Returns `null` when the file is missing (caller decides: new replica vs
+/// RequiresCleanDatabase for an existing user DB — do **not** auto-delete).
+pub fn load(io: Io, allocator: std.mem.Allocator, db_path: []const u8) IoError!?WalIndexMeta {
+    const path = try indexPathAlloc(allocator, db_path);
+    defer allocator.free(path);
+
+    // Read one extra byte so oversized files fail as InvalidMeta.
+    var buf: [meta_size + 1]u8 = undefined;
+    const data = Io.Dir.cwd().readFile(io, path, &buf) catch |e| switch (e) {
+        error.FileNotFound => return null,
+        else => return error.Io,
+    };
+    if (data.len != meta_size) return error.InvalidMeta;
+    return WalIndexMeta.decode(data[0..meta_size]);
+}
+
+/// Persist meta next to the DB (temp file then rename into place).
+///
+/// Callers must only advance `committed_frame_no` after a successful inject
+/// commit; this helper does not interpret frame numbers.
+pub fn save(io: Io, allocator: std.mem.Allocator, db_path: []const u8, meta: WalIndexMeta) IoError!void {
+    const path = try indexPathAlloc(allocator, db_path);
+    defer allocator.free(path);
+
+    const tmp = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
+    defer allocator.free(tmp);
+
+    var buf: [meta_size]u8 = undefined;
+    meta.encode(&buf);
+
+    Io.Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = &buf }) catch return error.Io;
+    Io.Dir.rename(Io.Dir.cwd(), tmp, Io.Dir.cwd(), path, io) catch return error.Io;
+}
+
 test "wal index meta round-trip" {
     const m = WalIndexMeta{
         .log_id = 0x11223344556677889900aabbccddeeff,
@@ -70,4 +115,32 @@ test "index path" {
     const p = try indexPathAlloc(gpa, "/var/lib/app/replica.db");
     defer gpa.free(p);
     try std.testing.expectEqualStrings("/var/lib/app/replica.db-client_wal_index", p);
+}
+
+test "meta load missing and save round-trip" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dir_path = dir_buf[0..try tmp.dir.realPath(io, &dir_buf)];
+    const db_path = try std.fs.path.join(gpa, &.{ dir_path, "replica.db" });
+    defer gpa.free(db_path);
+
+    try std.testing.expect((try load(io, gpa, db_path)) == null);
+
+    const m = WalIndexMeta{
+        .log_id = 0x11223344556677889900aabbccddeeff,
+        .committed_frame_no = 42,
+    };
+    try save(io, gpa, db_path, m);
+
+    const loaded = (try load(io, gpa, db_path)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(m.log_id, loaded.log_id);
+    try std.testing.expectEqual(m.committed_frame_no, loaded.committed_frame_no);
+
+    // Corrupt size → InvalidMeta
+    try tmp.dir.writeFile(io, .{ .sub_path = "replica.db-client_wal_index", .data = "short" });
+    try std.testing.expectError(error.InvalidMeta, load(io, gpa, db_path));
 }
