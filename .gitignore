@@ -11,3 +11,7 @@ node_modules
 *.db
 *.db-journal
 /tmp/
+
+# rusty / cargo bridge build
+bridge/target/
+bridge/.rusty/

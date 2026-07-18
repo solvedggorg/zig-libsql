@@ -71,11 +71,15 @@ Version strings (`build.zig.zon`, `src/root.zig`) must stay in sync.
 | `src/c/sqlite.zig` | Minimal explicit `extern` surface |
 | `src/util/path.zig` | Path / URI parsing |
 | `src/backend/remote.zig` | Hrana HTTP session (Phase 2) |
+| `src/backend/bridge.zig` | Optional DynLib loader for rusty replica sync (Phase 4) |
 | `src/backend/hrana/` | Pipeline JSON + HTTP transport |
+| `bridge/` | rusty `libsql_bridge` cdylib (gated; not default) |
+| `docs/rust-bridge.md` | Bridge enable + removal criteria |
 | `vendor/` | Pinned amalgamation — integrity in `vendor/VERSION` |
 | `src/main.zig` | Demo CLI only (not library surface) |
 | `docs/embedded-replicas.md` | Replica design (not implemented) |
 | `docs/replica-protocol-spike.md` | Classic replica wire/apply spike (done) |
+| `docs/rust-bridge.md` | Optional rusty cdylib for replica sync (R1) |
 | `docs/libsql-engine.md` | Engine pin policy |
 
 ---
