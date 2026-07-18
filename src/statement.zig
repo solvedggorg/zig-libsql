@@ -53,10 +53,13 @@ pub const Statement = struct {
 
     pub fn bindBlob(self: *Statement, idx: usize, blob: []const u8) err.Error!void {
         const destructor: ?*const anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, c.SQLITE_TRANSIENT))));
+        // Pass a non-NULL pointer for the zero-length case so an empty blob binds
+        // as an empty BLOB rather than SQL NULL (mirrors bindText).
+        const ptr: [*]const u8 = if (blob.len == 0) &[_]u8{} else blob.ptr;
         const rc = c.sqlite3_bind_blob(
             self.stmt,
             @intCast(idx),
-            if (blob.len == 0) null else blob.ptr,
+            ptr,
             @intCast(blob.len),
             destructor,
         );

@@ -39,16 +39,29 @@ pub const Connection = struct {
 
     pub fn prepare(self: *Connection, sql: []const u8) err.Error!Statement {
         var stmt: ?*c.sqlite3_stmt = null;
+        var tail: ?[*]const u8 = null;
         const rc = c.sqlite3_prepare_v2(
             self.db,
             sql.ptr,
             @intCast(sql.len),
             &stmt,
-            null,
+            &tail,
         );
         if (rc != c.SQLITE_OK or stmt == null) {
+            if (stmt) |s| _ = c.sqlite3_finalize(s);
             if (rc == c.SQLITE_NOMEM) return error.OutOfMemory;
             return error.Sql;
+        }
+        // Fail closed on multi-statement input: prepare only compiles the first
+        // statement, so a non-empty tail would silently drop the rest. Callers
+        // that need to run scripts should use `exec`.
+        if (tail) |t| {
+            const consumed = @intFromPtr(t) - @intFromPtr(sql.ptr);
+            const rest = std.mem.trim(u8, sql[consumed..], " \t\r\n;");
+            if (rest.len != 0) {
+                _ = c.sqlite3_finalize(stmt.?);
+                return error.Sql;
+            }
         }
         return .{
             .db = self.db,

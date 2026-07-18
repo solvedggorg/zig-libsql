@@ -44,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
         var col: usize = 0;
         while (col < n) : (col += 1) {
             if (col > 0) std.debug.print("|", .{});
-            const name = row.columnName(col) catch "?";
+            const name = try row.columnName(col);
             std.debug.print("{s}", .{name});
         }
         std.debug.print("\n", .{});

@@ -16,7 +16,7 @@ mod.link_libc = true;
 ```zig
 // build.zig.zon
 .dependencies = .{
-    .zig_libsql = .{ .path = "../zig-libsql" }, // or zig fetch URL + hash
+    .zig_libsql = .{ .path = "vendor/zig-libsql" }, // vendor locally; no network after clone
 },
 
 // build.zig

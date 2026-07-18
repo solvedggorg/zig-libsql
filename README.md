@@ -40,8 +40,8 @@ pub fn example(allocator: std.mem.Allocator) !void {
     try stmt.bindInt(1, 1);
 
     while (try stmt.step()) |row| {
-        const id = row.int(0);
-        const name = row.text(1);
+        const id = try row.int(0);
+        const name = try row.text(1);
         std.debug.print("{d} {s}\n", .{ id, name.? });
     }
 }

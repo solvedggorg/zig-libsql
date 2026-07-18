@@ -33,9 +33,12 @@ pub const Row = struct {
     pub fn text(self: Row, col: usize) err.Error!?[]const u8 {
         _ = try self.checkCol(col);
         if (c.sqlite3_column_type(self.stmt, @intCast(col)) == c.SQLITE_NULL) return null;
-        const ptr = c.sqlite3_column_text(self.stmt, @intCast(col)) orelse return null;
+        // A non-NULL column that yields no pointer means SQLite failed to
+        // materialize the value (e.g. OOM during conversion): fail closed rather
+        // than silently downgrading the value to null.
+        const ptr = c.sqlite3_column_text(self.stmt, @intCast(col)) orelse return error.Sql;
         const n = c.sqlite3_column_bytes(self.stmt, @intCast(col));
-        if (n < 0) return null;
+        if (n < 0) return error.Sql;
         return ptr[0..@intCast(n)];
     }
 
@@ -44,12 +47,13 @@ pub const Row = struct {
         _ = try self.checkCol(col);
         if (c.sqlite3_column_type(self.stmt, @intCast(col)) == c.SQLITE_NULL) return null;
         const n = c.sqlite3_column_bytes(self.stmt, @intCast(col));
-        if (n <= 0) {
-            // empty blob vs null already handled
-            if (n == 0) return &[_]u8{};
-            return null;
-        }
-        const ptr = c.sqlite3_column_blob(self.stmt, @intCast(col)) orelse return &[_]u8{};
+        if (n < 0) return error.Sql;
+        // sqlite3_column_blob returns NULL for a zero-length BLOB, which is a
+        // valid (non-NULL) empty blob — handle it before treating NULL as error.
+        if (n == 0) return &[_]u8{};
+        // n > 0 with a NULL pointer means SQLite could not materialize the blob
+        // (e.g. OOM during conversion): fail closed.
+        const ptr = c.sqlite3_column_blob(self.stmt, @intCast(col)) orelse return error.Sql;
         return ptr[0..@intCast(n)];
     }
 

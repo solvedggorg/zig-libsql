@@ -170,3 +170,35 @@ test "optional text bind" {
     try std.testing.expectEqualStrings("x", (try row.text(0)).?);
     try std.testing.expect(try row.isNull(1));
 }
+
+test "empty blob and text bind as non-null" {
+    const gpa = std.testing.allocator;
+    var db = try Database.open(gpa, .{ .path = ":memory:" });
+    defer db.deinit();
+    var conn = db.connect();
+    try conn.exec("create table t(b blob, s text);", .{});
+    var ins = try conn.prepare("insert into t(b, s) values (?1, ?2);");
+    defer ins.deinit();
+    try ins.bindBlob(1, "");
+    try ins.bindText(2, "");
+    try ins.execute();
+
+    var sel = try conn.prepare("select b, s from t;");
+    defer sel.deinit();
+    const row = (try sel.step()) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!(try row.isNull(0)));
+    try std.testing.expect(!(try row.isNull(1)));
+    try std.testing.expectEqualStrings("", (try row.blob(0)).?);
+    try std.testing.expectEqualStrings("", (try row.text(1)).?);
+}
+
+test "prepare rejects trailing statement" {
+    const gpa = std.testing.allocator;
+    var db = try Database.open(gpa, .{ .path = ":memory:" });
+    defer db.deinit();
+    var conn = db.connect();
+    try std.testing.expectError(error.Sql, conn.prepare("select 1; select 2;"));
+    // A single statement with a trailing `;` and whitespace still prepares.
+    var ok = try conn.prepare("select 1;  ");
+    ok.deinit();
+}
