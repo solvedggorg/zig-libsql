@@ -378,11 +378,15 @@ fn countSqlParameters(sql: []const u8) usize {
                 if (i < sql.len and std.ascii.isDigit(sql[i])) {
                     var n: usize = 0;
                     while (i < sql.len and std.ascii.isDigit(sql[i])) : (i += 1) {
-                        n = n * 10 + (sql[i] - '0');
+                        // Saturate on overflow: a pathologically long `?NNN`
+                        // clamps to usize.max instead of wrapping, so the
+                        // bind-count check rejects it (fail closed).
+                        n = n *| 10 +| @as(usize, sql[i] - '0');
                     }
                     if (n > max_index) max_index = n;
                 } else {
-                    max_index += 1;
+                    // Saturate rather than wrap once the count reaches usize.max.
+                    max_index +|= 1;
                 }
             },
             else => i += 1,

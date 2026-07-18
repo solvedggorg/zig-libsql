@@ -89,7 +89,7 @@ pub fn isCleartextRemote(url: []const u8) bool {
 /// - `wss://host/...` → `https://host/...`
 /// - `ws://host/...` → `http://host/...`
 /// - `https://` / `http://` left as-is (trailing slash stripped)
-pub fn toHttpBase(allocator: std.mem.Allocator, url: []const u8) error{OutOfMemory}![]u8 {
+pub fn toHttpBase(allocator: std.mem.Allocator, url: []const u8) error{ OutOfMemory, InvalidPath }![]u8 {
     const mapped = blk: {
         if (std.mem.startsWith(u8, url, "libsql://")) {
             break :blk try std.fmt.allocPrint(allocator, "https://{s}", .{url["libsql://".len..]});
@@ -102,6 +102,21 @@ pub fn toHttpBase(allocator: std.mem.Allocator, url: []const u8) error{OutOfMemo
         }
         break :blk try allocator.dupe(u8, url);
     };
+    errdefer allocator.free(mapped);
+
+    // Fail closed on remote URLs without a valid authority: inputs such as
+    // `https://` or `libsql://` map to a bare scheme with no host, which would
+    // otherwise be accepted and only fail later on a doomed HTTP request. The
+    // host is the run between `://` and the first `/`, `?`, or `#`.
+    const authority = blk2: {
+        const sep = "://";
+        const idx = std.mem.indexOf(u8, mapped, sep) orelse break :blk2 "";
+        const after = mapped[idx + sep.len ..];
+        const host_end = std.mem.indexOfAny(u8, after, "/?#") orelse after.len;
+        break :blk2 after[0..host_end];
+    };
+    if (authority.len == 0) return error.InvalidPath;
+
     // Strip trailing slashes for stable join with /v3/pipeline
     var end = mapped.len;
     while (end > 0 and mapped[end - 1] == '/') end -= 1;
@@ -116,4 +131,12 @@ test "toHttpBase libsql" {
     const u = try toHttpBase(gpa, "libsql://db.turso.io/");
     defer gpa.free(u);
     try std.testing.expectEqualStrings("https://db.turso.io", u);
+}
+
+test "toHttpBase rejects missing authority" {
+    const gpa = std.testing.allocator;
+    try std.testing.expectError(error.InvalidPath, toHttpBase(gpa, "https://"));
+    try std.testing.expectError(error.InvalidPath, toHttpBase(gpa, "libsql://"));
+    try std.testing.expectError(error.InvalidPath, toHttpBase(gpa, "ws://"));
+    try std.testing.expectError(error.InvalidPath, toHttpBase(gpa, "https:///only/path"));
 }
