@@ -79,7 +79,8 @@ the name “embedded replica.”**
 
 Link official libsql client / inject stack only when `-Denable-rust-bridge=true`.
 
-**Pros:** full classic parity sooner.  
+**Pros:** classic frame-apply / pull-sync MVP sooner (R1: pull sync + local
+reads; primary-write forwarding is future work).  
 **Cons:** second toolchain; must stay opt-in and documented for removal when
 pure path lands.
 

@@ -27,7 +27,10 @@ single-TU build) when we need local features that stock SQLite lacks, e.g.:
 - Other fork-only pragmas used by primary/replica tooling
 
 Until that pin lands, classic embedded replicas on pure stock SQLite are
-**unsupported**; use Phase 4 rusty bridge for a working replica path.
+**unsupported**. The Phase 4 rusty bridge is the intended near-term replica
+path, but it is not a working fallback yet: rusty cannot build the `libsql`
+0.9.x cdylib today, so this path stays unavailable until the bridge toolchain
+is available (see `docs/rust-bridge.md`).
 
 ## Policy
 

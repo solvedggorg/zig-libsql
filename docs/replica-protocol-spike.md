@@ -216,7 +216,7 @@ This path depends on **libSQL’s WAL manager / `libsql_sys` connection API**, n
 | Local apply | Stock SQLite / libsql-sqlite3 / rusty bridge | **Not stock SQLite.** Prefer **Phase 4 rusty bridge** for first working feature; long-term pure Zig + libsql engine pin + inject port |
 | Write path v1 | Primary-only vs offline | **Primary-only** (locked) |
 | Auth policy | Token optional vs required | **Require `auth_token` when replica/sync URL is set** (fail closed); TLS/HTTPS only in production |
-| Open API shape | Design’s `path` + `url` + … | Keep **`path` (local file) + `sync_url` (or `url`) + `auth_token` + `io` + `sync_interval_ms`**; add explicit `kind` dual open; do not overload single `path` remote URL |
+| Open API shape | Design’s `path` + `url` + … | Keep **`path` (local file) + `sync_url` + `auth_token` + `io` + `sync_interval_ms`**; add explicit `kind` dual open; do not overload single `path` remote URL |
 | First code slice | Manual `sync()` vs interval | **Manual `Database.sync()` only** first; interval later |
 | Soft replica | Ship as interim | **No** as a substitute named “embedded replica” |
 
@@ -266,19 +266,22 @@ rusty init libsql_bridge -lib -y   # or equivalent
 
 ## 8. Mapping to proposed Zig API
 
-Design sketch (still not implemented):
+Status: R1 pull-sync is **implemented** via the rusty bridge
+(`OpenOptions.sync_url` + `Database.sync()`, gated `-Denable-rust-bridge`).
+Primary-write forwarding is **not yet implemented** and remains future work.
 
 ```zig
 var db = try libsql.Database.open(allocator, .{
     .path = "replica.db",              // local file (required)
-    .sync_url = "libsql://primary…",   // primary for frames + writes
+    .sync_url = "libsql://primary…",   // primary to pull frames from (R1)
     .auth_token = token,               // required for replica open
     .io = io,                          // required
     .sync_interval_ms = 0,             // 0 = manual only
     .read_your_writes = true,          // after primary write (bridge/inject)
 });
-try db.sync();                         // Hello + pull until caught up
-var conn = db.connect();               // local reads; writes → primary when replica mode
+try db.sync();                         // R1: pull frames until caught up (implemented)
+var conn = db.connect();               // local reads (implemented);
+                                       // writes → primary forwarding: future work, not R1
 ```
 
 Fail closed:

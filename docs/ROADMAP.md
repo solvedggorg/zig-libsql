@@ -59,6 +59,7 @@ README, AGENTS, ROADMAP, package scaffold.
 R1 classic replica sync uses a **rusty-built cdylib** (not cargo product path):
 
 ```sh
+rusty init libsql_bridge -lib -y    # bootstrap the bridge package (once)
 zig build bridge                    # rusty build in bridge/
 zig build -Denable-rust-bridge=true
 ```
