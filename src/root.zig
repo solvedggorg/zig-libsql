@@ -40,6 +40,9 @@ test {
     _ = @import("connection.zig");
     _ = @import("database.zig");
     _ = @import("backend/remote.zig");
+    _ = @import("backend/hrana/value_json.zig");
+    _ = @import("backend/hrana/pipeline.zig");
+    _ = @import("backend/hrana/http.zig");
 }
 
 test "engine version non-empty" {
@@ -141,12 +144,42 @@ test "file durability" {
     }
 }
 
-test "remote open unsupported" {
+test "remote open requires io" {
     const gpa = std.testing.allocator;
     try std.testing.expectError(error.Unsupported, Database.open(gpa, .{
         .path = "libsql://example.turso.io",
         .auth_token = "secret",
+        // no io → Unsupported
     }));
+}
+
+test "remote open with io creates session" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var db = try Database.open(gpa, .{
+        .path = "libsql://example.turso.io",
+        .auth_token = "secret",
+        .io = io,
+    });
+    defer db.deinit();
+    try std.testing.expect(db.isRemote());
+}
+
+test "live remote smoke (gated)" {
+    // Set LIBSQL_URL and LIBSQL_AUTH_TOKEN to exercise a real server.
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const url = std.process.Environ.getPosix(std.testing.environ, "LIBSQL_URL") orelse return error.SkipZigTest;
+    const token = std.process.Environ.getPosix(std.testing.environ, "LIBSQL_AUTH_TOKEN");
+
+    var db = try Database.open(gpa, .{
+        .path = url,
+        .auth_token = token,
+        .io = io,
+    });
+    defer db.deinit();
+    var conn = db.connect();
+    try conn.exec("select 1;", .{});
 }
 
 test "convenience open owns handle" {
