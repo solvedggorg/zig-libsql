@@ -179,6 +179,10 @@ pub const Database = struct {
     /// Closes the local SQLite handle for the duration of sync (official clients
     /// forbid concurrent open during inject), then reopens it.
     ///
+    /// On failure the local handle is reopened best-effort. If that reopen also
+    /// fails, its error is returned (superseding any bridge error) to signal that
+    /// `local_db` is null and the `Database` can no longer serve `connect()`.
+    ///
     /// Requires `-Denable-rust-bridge=true` and a loadable `liblibsql_bridge` cdylib.
     pub fn sync(self: *Database) err.Error!SyncResult {
         const surl = self.sync_url orelse return error.Unsupported;
@@ -192,7 +196,11 @@ pub const Database = struct {
 
         const result = bridge.syncOnce(self.path, surl, token, self.read_your_writes) catch |e| {
             // Best-effort reopen so the Database remains usable after a failed sync.
-            self.local_db = openLocalPath(self.allocator, self.path, self.local_flags) catch null;
+            // If the reopen itself fails, surface that error: `local_db` is now null
+            // and later `connect()` calls would silently operate on a dead handle.
+            self.local_db = openLocalPath(self.allocator, self.path, self.local_flags) catch |reopen_err| {
+                return reopen_err;
+            };
             return e;
         };
 
