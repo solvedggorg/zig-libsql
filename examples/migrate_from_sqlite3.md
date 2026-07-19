@@ -13,12 +13,13 @@ mod.link_libc = true;
 
 ## Target
 
-```zig
-// build.zig.zon
-.dependencies = .{
-    .zig_libsql = .{ .path = "vendor/zig-libsql" }, // vendor locally; no network after clone
-},
+Production: fetch a **release tag** (not a monorepo path). See [docs/CONSUMING.md](../docs/CONSUMING.md).
 
+```sh
+zig fetch --save https://github.com/solvedggorg/zig-libsql/archive/refs/tags/v0.2.0.tar.gz
+```
+
+```zig
 // build.zig
 const libsql = b.dependency("zig_libsql", .{
     .target = target,
@@ -27,6 +28,8 @@ const libsql = b.dependency("zig_libsql", .{
 mod.addImport("zig_libsql", libsql.module("zig_libsql"));
 // drop linkSystemLibrary("sqlite3")
 ```
+
+Local hack only: `.zig_libsql = .{ .path = "../zig-libsql" }` in `build.zig.zon`.
 
 ```zig
 // store.zig
@@ -47,8 +50,10 @@ var stmt = try conn.prepare(
 );
 defer stmt.deinit();
 try stmt.bindText(1, session.clerk_user_id);
+// optional: try stmt.bindNull(2);
 // ...
 try stmt.execute();
+// on failure (local): conn.lastErrorMessage()
 ```
 
 ## Security still on the consumer
@@ -73,3 +78,5 @@ try stmt.execute();
 | `sqlite3_column_*` | `Row.int/text/blob/...` |
 | `sqlite3_finalize` | `Statement.deinit` |
 | `sqlite3_close` | `Database.deinit` |
+| `sqlite3_errmsg` | `Connection.lastErrorMessage` |
+| `sqlite3_extended_errcode` | `Connection.lastErrorCode` |

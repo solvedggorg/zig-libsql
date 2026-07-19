@@ -180,4 +180,26 @@ pub const Connection = struct {
             .remote => self.session.?.last_insert_rowid,
         };
     }
+
+    /// Last SQLite error message for this connection (local only).
+    ///
+    /// Empty string for remote connections. Not owned; valid until the next
+    /// SQL operation on the underlying handle. After a failed `exec`/`prepare`,
+    /// prefer this over discarded per-call errmsg pointers — the handle still
+    /// carries the message via `sqlite3_errmsg`.
+    pub fn lastErrorMessage(self: *const Connection) []const u8 {
+        return switch (self.kind) {
+            .local => err.errmsg(self.db),
+            .remote => "",
+        };
+    }
+
+    /// Last extended SQLite error code for this connection (local only).
+    /// Returns `0` for remote connections.
+    pub fn lastErrorCode(self: *const Connection) c_int {
+        return switch (self.kind) {
+            .local => c.sqlite3_extended_errcode(self.db),
+            .remote => 0,
+        };
+    }
 };
