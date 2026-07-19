@@ -10,6 +10,7 @@ const std = @import("std");
 // same compilation unit as the submodule unit tests.
 const libsql = @import("root.zig");
 const Database = libsql.Database;
+const Connection = libsql.Connection;
 const Value = libsql.Value;
 const open = libsql.open;
 const engineVersion = libsql.engineVersion;
@@ -327,8 +328,16 @@ test "lastErrorMessage after bad SQL" {
     defer db.deinit();
     var conn = db.connect();
     try std.testing.expectError(error.Sql, conn.exec("not valid sql;;;", .{}));
-    try std.testing.expect(conn.lastErrorMessage().len > 0);
-    try std.testing.expect(conn.lastErrorCode() != 0);
+    try std.testing.expect((try conn.lastErrorMessage()).len > 0);
+    try std.testing.expect((try conn.lastErrorCode()) != 0);
+}
+
+test "remote diagnostics fail closed" {
+    // Remote connections have no SQLite handle: both accessors must fail closed
+    // with error.Unsupported rather than regress to the old ""/0 sentinels.
+    const conn: Connection = .{ .allocator = std.testing.allocator, .kind = .remote };
+    try std.testing.expectError(error.Unsupported, conn.lastErrorMessage());
+    try std.testing.expectError(error.Unsupported, conn.lastErrorCode());
 }
 
 // Consumer contract: auth-style session store (mirrors rusty auth.db schema).
@@ -402,6 +411,8 @@ test "auth store contract put get clear" {
         try std.testing.expectEqualStrings("access-secret", access);
         try std.testing.expectEqualStrings("refresh-secret", refresh);
         try std.testing.expectEqual(@as(i64, 1_700_000_000), try row.int(4));
+        try std.testing.expectEqualStrings("profile email", (try row.text(5)).?);
+        try std.testing.expectEqual(@as(i64, 1_700_000_000), try row.int(6));
     }
 
     // Optional columns: bindNull for missing email / refresh / scopes.

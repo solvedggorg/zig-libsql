@@ -183,23 +183,27 @@ pub const Connection = struct {
 
     /// Last SQLite error message for this connection (local only).
     ///
-    /// Empty string for remote connections. Not owned; valid until the next
-    /// SQL operation on the underlying handle. After a failed `exec`/`prepare`,
-    /// prefer this over discarded per-call errmsg pointers — the handle still
-    /// carries the message via `sqlite3_errmsg`.
-    pub fn lastErrorMessage(self: *const Connection) []const u8 {
+    /// Not owned; valid until the next SQL operation on the underlying handle.
+    /// After a failed `exec`/`prepare`, prefer this over discarded per-call
+    /// errmsg pointers: the handle still carries the message via
+    /// `sqlite3_errmsg`. Remote connections have no SQLite handle, so this
+    /// fails closed with `error.Unsupported` rather than returning an empty
+    /// string that callers could mistake for "no error".
+    pub fn lastErrorMessage(self: *const Connection) err.Error![]const u8 {
         return switch (self.kind) {
             .local => err.errmsg(self.db),
-            .remote => "",
+            .remote => error.Unsupported,
         };
     }
 
     /// Last extended SQLite error code for this connection (local only).
-    /// Returns `0` for remote connections.
-    pub fn lastErrorCode(self: *const Connection) c_int {
+    ///
+    /// Remote connections fail closed with `error.Unsupported`: `0` would be
+    /// indistinguishable from `SQLITE_OK` (success).
+    pub fn lastErrorCode(self: *const Connection) err.Error!c_int {
         return switch (self.kind) {
             .local => c.sqlite3_extended_errcode(self.db),
-            .remote => 0,
+            .remote => error.Unsupported,
         };
     }
 };

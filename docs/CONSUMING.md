@@ -15,6 +15,8 @@ Prefer a **published GitHub tag** so builds are reproducible and offline after f
 zig fetch --save https://github.com/solvedggorg/zig-libsql/archive/refs/tags/v0.2.0.tar.gz
 ```
 
+> The `v0.2.0` tarball resolves only after that release tag is published. Until then, use the [local path dep](#local-path-development-only) below and swap to the tag once it exists.
+
 That writes `url` + content `hash` into your `build.zig.zon` under `.dependencies.zig_libsql`.
 
 ### `build.zig`
@@ -50,8 +52,8 @@ while (try stmt.step()) |row| {
     _ = s;
 }
 
-// After a failed exec/prepare (local):
-// log.err("sql: {s}", .{conn.lastErrorMessage()});
+// After a failed exec/prepare (local; errors with Unsupported on remote):
+// log.err("sql: {s}", .{try conn.lastErrorMessage()});
 ```
 
 Module name: **`zig_libsql`**. Package name in `build.zig.zon`: **`zig_libsql`**.

@@ -86,6 +86,8 @@ while (try stmt.step()) |row| {
 zig fetch --save https://github.com/solvedggorg/zig-libsql/archive/refs/tags/v0.2.0.tar.gz
 ```
 
+Resolves once `v0.2.0` is tagged; use a local path dep for pre-release development.
+
 Import module **`zig_libsql`**. Full consumer guide: [docs/CONSUMING.md](docs/CONSUMING.md).
 
 Local path deps are for development only.

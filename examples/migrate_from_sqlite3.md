@@ -19,6 +19,8 @@ Production: fetch a **release tag** (not a monorepo path). See [docs/CONSUMING.m
 zig fetch --save https://github.com/solvedggorg/zig-libsql/archive/refs/tags/v0.2.0.tar.gz
 ```
 
+> Resolves once `v0.2.0` is tagged; use the local path dep below for pre-release development.
+
 ```zig
 // build.zig
 const libsql = b.dependency("zig_libsql", .{
