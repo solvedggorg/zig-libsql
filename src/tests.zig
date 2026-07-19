@@ -10,6 +10,7 @@ const std = @import("std");
 // same compilation unit as the submodule unit tests.
 const libsql = @import("root.zig");
 const Database = libsql.Database;
+const Connection = libsql.Connection;
 const Value = libsql.Value;
 const open = libsql.open;
 const engineVersion = libsql.engineVersion;
@@ -329,6 +330,14 @@ test "lastErrorMessage after bad SQL" {
     try std.testing.expectError(error.Sql, conn.exec("not valid sql;;;", .{}));
     try std.testing.expect((try conn.lastErrorMessage()).len > 0);
     try std.testing.expect((try conn.lastErrorCode()) != 0);
+}
+
+test "remote diagnostics fail closed" {
+    // Remote connections have no SQLite handle: both accessors must fail closed
+    // with error.Unsupported rather than regress to the old ""/0 sentinels.
+    const conn: Connection = .{ .allocator = std.testing.allocator, .kind = .remote };
+    try std.testing.expectError(error.Unsupported, conn.lastErrorMessage());
+    try std.testing.expectError(error.Unsupported, conn.lastErrorCode());
 }
 
 // Consumer contract: auth-style session store (mirrors rusty auth.db schema).
