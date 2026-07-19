@@ -86,12 +86,11 @@ wire+inject parity (R2/R3).
 
 ## First consumer / release track
 
-**rusty** product auth (`$RUSTY_HOME/auth.db`) currently uses system
-`libsqlite3`. Target integration:
-
-1. Production-harden local API + auth contract tests (this cut).
-2. Tag **`v0.2.0`** and GitHub Release on `solvedggorg/zig-libsql`.
-3. rusty: `zig fetch --save` the tag tarball (not a monorepo path dep).
-4. Migrate `src/auth/store.zig` off system `libsqlite3`.
+| Step | Status |
+|------|--------|
+| Production-harden local API + auth contract tests | ✅ |
+| Tag **`v0.2.0`** + GitHub Release | ✅ https://github.com/solvedggorg/zig-libsql/releases/tag/v0.2.0 |
+| rusty `zig fetch --save` tag tarball | ✅ (PR) |
+| Migrate rusty `auth.db` off system `libsqlite3` | ✅ (PR https://github.com/solvedggorg/rusty/pull/22) |
 
 Consumer guide: `docs/CONSUMING.md`. Replica R3b / rusty bridge stay **0.3.x**.
