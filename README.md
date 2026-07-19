@@ -80,7 +80,15 @@ while (try stmt.step()) |row| {
 
 `libsql://` and `wss://` map to `https://` for the HTTP pipeline.
 
-Add as a dependency via path or `zig fetch` and import module **`zig_libsql`**.
+### Depend (production)
+
+```sh
+zig fetch --save https://github.com/solvedggorg/zig-libsql/archive/refs/tags/v0.2.0.tar.gz
+```
+
+Import module **`zig_libsql`**. Full consumer guide: [docs/CONSUMING.md](docs/CONSUMING.md).
+
+Local path deps are for development only.
 
 ## Design
 

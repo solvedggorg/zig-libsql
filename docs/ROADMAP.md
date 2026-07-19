@@ -49,6 +49,8 @@ README, AGENTS, ROADMAP, package scaffold.
 - [x] Engine pin policy (`docs/libsql-engine.md`) — keep SQLite until fork needed
 - [x] Replica **protocol spike** (`docs/replica-protocol-spike.md`) — classic
   gRPC-Web page frames; apply needs libSQL WAL inject (not stock SQLite)
+- [x] Production consumer prep — `lastErrorMessage`/`lastErrorCode`, auth-store
+  contract test, `docs/CONSUMING.md`, CI; first release track `v0.2.0`
 - [ ] Replica **implementation** — next slices:
   1. **R1 (scaffold):** Phase 4 rusty bridge — required for libSQL WAL
      injection unavailable in stock SQLite; see `docs/rust-bridge.md`
@@ -82,7 +84,14 @@ wire+inject parity (R2/R3).
 - Full Turso Cloud feature marketing claims before implementation
 - Shipping `libsql-server` from this package
 
-## First consumer
+## First consumer / release track
 
 **rusty** product auth (`$RUSTY_HOME/auth.db`) currently uses system
-`libsqlite3`. Target: `@import("zig_libsql")` with path/git dep.
+`libsqlite3`. Target integration:
+
+1. Production-harden local API + auth contract tests (this cut).
+2. Tag **`v0.2.0`** and GitHub Release on `solvedggorg/zig-libsql`.
+3. rusty: `zig fetch --save` the tag tarball (not a monorepo path dep).
+4. Migrate `src/auth/store.zig` off system `libsqlite3`.
+
+Consumer guide: `docs/CONSUMING.md`. Replica R3b / rusty bridge stay **0.3.x**.

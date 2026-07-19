@@ -320,3 +320,132 @@ test "batch local rolls back on error" {
     const row = (try sel.step()) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(i64, 0), try row.int(0));
 }
+
+test "lastErrorMessage after bad SQL" {
+    const gpa = std.testing.allocator;
+    var db = try Database.open(gpa, .{ .path = ":memory:" });
+    defer db.deinit();
+    var conn = db.connect();
+    try std.testing.expectError(error.Sql, conn.exec("not valid sql;;;", .{}));
+    try std.testing.expect(conn.lastErrorMessage().len > 0);
+    try std.testing.expect(conn.lastErrorCode() != 0);
+}
+
+// Consumer contract: auth-style session store (mirrors rusty auth.db schema).
+test "auth store contract put get clear" {
+    const gpa = std.testing.allocator;
+    var db = try Database.open(gpa, .{ .path = ":memory:" });
+    defer db.deinit();
+    var conn = db.connect();
+
+    try conn.exec(
+        \\PRAGMA journal_mode=DELETE;
+        \\CREATE TABLE IF NOT EXISTS meta (
+        \\  key   TEXT PRIMARY KEY,
+        \\  value TEXT NOT NULL
+        \\);
+        \\CREATE TABLE IF NOT EXISTS session (
+        \\  id              INTEGER PRIMARY KEY CHECK (id = 1),
+        \\  clerk_user_id   TEXT NOT NULL,
+        \\  email           TEXT,
+        \\  access_token    TEXT NOT NULL,
+        \\  refresh_token   TEXT,
+        \\  expires_at      INTEGER NOT NULL,
+        \\  scopes          TEXT,
+        \\  updated_at      INTEGER NOT NULL
+        \\);
+        \\INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '1');
+    , .{});
+
+    {
+        var ins = try conn.prepare(
+            \\INSERT INTO session(id, clerk_user_id, email, access_token, refresh_token, expires_at, scopes, updated_at)
+            \\VALUES(1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            \\ON CONFLICT(id) DO UPDATE SET
+            \\  clerk_user_id=excluded.clerk_user_id,
+            \\  email=excluded.email,
+            \\  access_token=excluded.access_token,
+            \\  refresh_token=excluded.refresh_token,
+            \\  expires_at=excluded.expires_at,
+            \\  scopes=excluded.scopes,
+            \\  updated_at=excluded.updated_at;
+        );
+        defer ins.deinit();
+        try ins.bindText(1, "user_abc");
+        try ins.bindText(2, "dev@example.com");
+        try ins.bindText(3, "access-secret");
+        try ins.bindText(4, "refresh-secret");
+        try ins.bindInt(5, 1_700_000_000);
+        try ins.bindText(6, "profile email");
+        try ins.bindInt(7, 1_700_000_000);
+        try ins.execute();
+    }
+
+    {
+        var sel = try conn.prepare(
+            \\SELECT clerk_user_id, email, access_token, refresh_token, expires_at, scopes, updated_at
+            \\FROM session WHERE id = 1;
+        );
+        defer sel.deinit();
+        const row = (try sel.step()) orelse return error.TestUnexpectedResult;
+        // Column text is borrowed; consumers must dupe before next step/deinit.
+        const user_id = try gpa.dupe(u8, (try row.text(0)).?);
+        defer gpa.free(user_id);
+        const email = try gpa.dupe(u8, (try row.text(1)).?);
+        defer gpa.free(email);
+        const access = try gpa.dupe(u8, (try row.text(2)).?);
+        defer gpa.free(access);
+        const refresh = try gpa.dupe(u8, (try row.text(3)).?);
+        defer gpa.free(refresh);
+        try std.testing.expectEqualStrings("user_abc", user_id);
+        try std.testing.expectEqualStrings("dev@example.com", email);
+        try std.testing.expectEqualStrings("access-secret", access);
+        try std.testing.expectEqualStrings("refresh-secret", refresh);
+        try std.testing.expectEqual(@as(i64, 1_700_000_000), try row.int(4));
+    }
+
+    // Optional columns: bindNull for missing email / refresh / scopes.
+    {
+        var ins = try conn.prepare(
+            \\INSERT INTO session(id, clerk_user_id, email, access_token, refresh_token, expires_at, scopes, updated_at)
+            \\VALUES(1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            \\ON CONFLICT(id) DO UPDATE SET
+            \\  clerk_user_id=excluded.clerk_user_id,
+            \\  email=excluded.email,
+            \\  access_token=excluded.access_token,
+            \\  refresh_token=excluded.refresh_token,
+            \\  expires_at=excluded.expires_at,
+            \\  scopes=excluded.scopes,
+            \\  updated_at=excluded.updated_at;
+        );
+        defer ins.deinit();
+        try ins.bindText(1, "user_xyz");
+        try ins.bindNull(2);
+        try ins.bindText(3, "tok");
+        try ins.bindNull(4);
+        try ins.bindInt(5, 42);
+        try ins.bindNull(6);
+        try ins.bindInt(7, 43);
+        try ins.execute();
+    }
+
+    {
+        var sel = try conn.prepare(
+            \\SELECT clerk_user_id, email, access_token, refresh_token, scopes FROM session WHERE id = 1;
+        );
+        defer sel.deinit();
+        const row = (try sel.step()) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings("user_xyz", (try row.text(0)).?);
+        try std.testing.expect((try row.text(1)) == null);
+        try std.testing.expectEqualStrings("tok", (try row.text(2)).?);
+        try std.testing.expect((try row.text(3)) == null);
+        try std.testing.expect((try row.text(4)) == null);
+    }
+
+    try conn.exec("DELETE FROM session WHERE id = 1;", .{});
+    {
+        var sel = try conn.prepare("SELECT 1 FROM session WHERE id = 1;");
+        defer sel.deinit();
+        try std.testing.expect((try sel.step()) == null);
+    }
+}

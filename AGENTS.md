@@ -82,6 +82,7 @@ Version strings (`build.zig.zon`, `src/root.zig`) must stay in sync.
 | `docs/replica-protocol-spike.md` | Classic replica wire/apply spike (done) |
 | `docs/rust-bridge.md` | Optional rusty cdylib for replica sync (R1) |
 | `docs/libsql-engine.md` | Engine pin policy |
+| `docs/CONSUMING.md` | How products `zig fetch` and integrate |
 
 ---
 
@@ -103,6 +104,9 @@ zig build run -- :memory: "select 1 as n;"
 ```
 
 Default module must **not** link system `sqlite3`.
+
+Production consumers depend on **GitHub release tags** via `zig fetch --save`
+(see `docs/CONSUMING.md`). Do not document monorepo path deps as the product path.
 
 ---
 
