@@ -62,9 +62,10 @@ stream RPCs.
 
 ## Next (R3b+)
 
-1. libsql engine pin + WAL inject  
-2. Wire client → inject → meta; then pure public `Database.sync()`  
-3. Apply only via R1 bridge until then — never claim stock SQLite inject  
+1. ~~libsql engine pin~~ (**R3b.0** — `-Dengine=libsql`, `vendor/libsql/`)  
+2. **WAL inject** (R3b.1 — InjectorWal / `libsql_open_v3`)  
+3. Wire client → inject → meta; flip pure public `Database.sync()` (R3b.2)  
+4. Apply only via R1 bridge or pure inject — never claim stock SQLite inject 
 
 ## Security
 

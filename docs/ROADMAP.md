@@ -16,8 +16,8 @@ engine, pure Zig remote (Hrana) — not a cargo wrapper.
 | Batch | **MVP** | Phase 3 — local txn + remote Hrana batch |
 | Remote Hrana HTTP | **MVP** | Phase 2 — JSON `v3/pipeline` |
 | Hrana WebSocket | later | |
-| Embedded replicas | design + spike + R1 + R2.1 + R3a | Protocol + pure Zig pull/Snapshot (no inject); rusty sync gated (`docs/rust-bridge.md`) |
-| libSQL SQL extensions | deferred | Stay on stock SQLite until needed (`docs/libsql-engine.md`) |
+| Embedded replicas | design + spike + R1 + R2.1 + R3a + **R3b.0** | Protocol + pull/Snapshot; libsql engine pin; inject not yet (`docs/libsql-engine.md`) |
+| libSQL SQL extensions | deferred | Default stock SQLite; opt-in `-Dengine=libsql` for inject |
 | System libsqlite3 backend | non-goal | Debug-only option only if ever added |
 | Rust C FFI default | non-goal | Optional bridge only (Phase 4) |
 
@@ -62,7 +62,14 @@ README, AGENTS, ROADMAP, package scaffold.
      **no** public pure `Database.sync` / inject
   4. **R3a ✅:** streaming `Snapshot` + `error.NeedSnapshot` recovery in
      `pullUntilCaughtUp` (still no inject / public pure sync)
-  5. **R3b (next):** libsql engine pin + WAL inject → pure `Database.sync`
+  5. **R3b (0.3 workstream — in progress):**
+     - **R3b.0 ✅:** vendor libSQL amalgamation + `-Dengine=sqlite|libsql`,
+       `inject.zig` scaffold, pure `sync()` path that fails closed until
+       inject is implemented (`docs/libsql-engine.md`)
+     - **R3b.1 (next):** InjectorWal / `libsql_open_v3` apply port
+     - **R3b.2:** wire pull → inject → meta; flip `inject.implemented`;
+       pure public `Database.sync` without rusty bridge
+     - **R3b.3:** parity tests vs classic primary / bridge
 
 ### Phase 4 — Optional Rust interop
 
@@ -93,4 +100,5 @@ wire+inject parity (R2/R3).
 | rusty `zig fetch --save` tag tarball | ✅ (PR) |
 | Migrate rusty `auth.db` off system `libsqlite3` | ✅ (PR https://github.com/solvedggorg/rusty/pull/22) |
 
-Consumer guide: `docs/CONSUMING.md`. Replica R3b / rusty bridge stay **0.3.x**.
+Consumer guide: `docs/CONSUMING.md`. Replica R3b / rusty bridge stay **0.3.x**
+(package version remains **0.2.0** until pure inject ships; R3b.0 is foundation only).

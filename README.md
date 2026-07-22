@@ -95,9 +95,9 @@ Local path deps are for development only.
 | Layer | Implementation |
 |-------|----------------|
 | Public API | Idiomatic Zig (`Database`, `Connection`, `Statement`, `batch`) |
-| Local engine | `vendor/sqlite3.c` compiled into the module |
+| Local engine | `vendor/sqlite3.c` (default) or `vendor/libsql/` via `-Dengine=libsql` |
 | Remote | Hrana over HTTP JSON (`src/backend/hrana/`) |
-| Replicas | Design + protocol spike — `docs/embedded-replicas.md`, `docs/replica-protocol-spike.md` |
+| Replicas | Wire + pull landed; inject R3b in progress — `docs/ROADMAP.md` |
 | Rust | Optional rusty cdylib for classic replica **sync** — `docs/rust-bridge.md` (`-Denable-rust-bridge`) |
 
 See [AGENTS.md](AGENTS.md) for engineering rules.

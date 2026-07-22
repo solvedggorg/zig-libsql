@@ -1,6 +1,20 @@
 //! Minimal SQLite C bindings for the local backend.
 //! Prefer explicit `extern` over `@cImport` so we only depend on the surface we use.
-//! Linked object comes from `vendor/sqlite3.c` (compiled by Zig), not system libsqlite3.
+//! Linked object comes from the selected amalgamation (`-Dengine=sqlite|libsql`),
+//! not system libsqlite3.
+
+const std = @import("std");
+const build_options = @import("build_options");
+
+/// Which amalgamation was compiled into this module.
+pub const Engine = enum { sqlite, libsql };
+
+pub const engine: Engine = switch (build_options.engine) {
+    .sqlite => .sqlite,
+    .libsql => .libsql,
+};
+
+pub const engine_is_libsql = engine == .libsql;
 
 pub const SQLITE_OK: c_int = 0;
 pub const SQLITE_ERROR: c_int = 1;
@@ -124,3 +138,10 @@ pub extern fn sqlite3_clear_bindings(stmt: ?*sqlite3_stmt) c_int;
 pub extern fn sqlite3_changes(db: ?*sqlite3) c_int;
 pub extern fn sqlite3_last_insert_rowid(db: ?*sqlite3) i64;
 pub extern fn sqlite3_libversion() [*:0]const u8;
+
+/// libSQL package version string when `-Dengine=libsql`; null for stock SQLite.
+pub fn libsqlVersion() ?[]const u8 {
+    if (comptime !engine_is_libsql) return null;
+    const extra = @import("libsql_extra.zig");
+    return std.mem.span(extra.libsql_libversion());
+}

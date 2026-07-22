@@ -68,15 +68,15 @@ Version strings (`build.zig.zon`, `src/root.zig`) must stay in sync.
 | `src/rows.zig` | Row iteration + typed getters |
 | `src/value.zig` | Value / bind types |
 | `src/error.zig` | Error set + mapping |
-| `src/c/sqlite.zig` | Minimal explicit `extern` surface |
+| `src/c/sqlite.zig` | Minimal explicit `extern` surface + engine kind |
+| `src/c/libsql_extra.zig` | libSQL-only symbols (`-Dengine=libsql`) |
 | `src/util/path.zig` | Path / URI parsing |
 | `src/backend/remote.zig` | Hrana HTTP session (Phase 2) |
 | `src/backend/bridge.zig` | Optional DynLib loader for rusty replica sync (Phase 4) |
-| `src/backend/replication/` | Pure Zig classic replica wire codecs (R2; not public sync) |
+| `src/backend/replication/` | Wire codecs + pull client + inject scaffold (R2–R3b) |
 | `src/backend/hrana/` | Pipeline JSON + HTTP transport |
 | `bridge/` | rusty `libsql_bridge` cdylib (gated; not default) |
-| `docs/rust-bridge.md` | Bridge enable + removal criteria |
-| `vendor/` | Pinned amalgamation — integrity in `vendor/VERSION` |
+| `vendor/` | Stock SQLite pin (`VERSION`); libSQL pin (`libsql/VERSION`) |
 | `src/main.zig` | Demo CLI only (not library surface) |
 | `docs/embedded-replicas.md` | Replica design (not implemented) |
 | `docs/replica-protocol-spike.md` | Classic replica wire/apply spike (done) |

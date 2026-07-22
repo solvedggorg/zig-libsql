@@ -1,51 +1,57 @@
 # Local engine pin — SQLite vs libSQL fork
 
-## Current pin
+## Current pins
 
-| Field | Value |
-|-------|--------|
-| Engine | SQLite amalgamation **3.49.1** |
-| Location | `vendor/sqlite3.c`, `vendor/sqlite3.h` |
-| Built by | Zig C compilation (not system `libsqlite3`) |
-| Record | `vendor/VERSION` (checksums) |
+| Engine | Default | Location | Record |
+|--------|---------|----------|--------|
+| **sqlite** (default) | yes | `vendor/sqlite3.c`, `vendor/sqlite3.h` | `vendor/VERSION` — SQLite **3.49.1** |
+| **libsql** | no (`-Dengine=libsql`) | `vendor/libsql/sqlite3.{c,h}` | `vendor/libsql/VERSION` — libSQL **0.2.3** bundled amalgamation |
 
-This is **SQLite-compatible** and sufficient for:
+Built by Zig C compilation (not system `libsqlite3`). Only **one** engine is linked per build (shared SQLite symbols).
+
+### Default (`-Dengine=sqlite`)
+
+Stock SQLite is sufficient for:
 
 - rusty auth stores and similar local apps
 - full prepare / bind / step / transaction surface
 - remote Hrana (engine is on the server)
 
-## When to switch to libSQL-sqlite3
+### Opt-in libSQL (`-Dengine=libsql`)
 
-Consider vendoring Turso’s **libsql-sqlite3** amalgamation (or equivalent
-single-TU build) when we need local features that stock SQLite lacks, e.g.:
+Required for classic **embedded replica WAL inject** (R3b). Virtual WAL /
+`libsql_open_v3` exist only in the fork. Until pure inject is `implemented`
+(`src/backend/replication/inject.zig`), replica `sync()` still fails closed
+unless the rusty bridge is enabled.
 
-- libSQL-specific SQL extensions (column type changes, etc.)
-- Virtual WAL hooks required for **embedded replica apply** (confirmed by
-  protocol spike: `SqliteInjector` / custom `WalManager` — see
-  `docs/replica-protocol-spike.md`)
-- Other fork-only pragmas used by primary/replica tooling
+```sh
+zig build -Dengine=libsql
+zig build test -Dengine=libsql
+```
 
-Until that pin lands, classic embedded replicas on pure stock SQLite are
-**unsupported**. The Phase 4 rusty bridge is the intended near-term replica
-path, but it is not a working fallback yet: rusty cannot build the `libsql`
-0.9.x cdylib today, so this path stays unavailable until the bridge toolchain
-is available (see `docs/rust-bridge.md`).
+Feature detection:
+
+```zig
+const libsql = @import("zig_libsql");
+_ = libsql.engine;           // .sqlite | .libsql
+_ = libsql.engineVersion();  // sqlite3_libversion()
+_ = libsql.libsqlVersion();  // non-null only when engine == .libsql
+_ = libsql.pure_inject_available();
+```
 
 ## Policy
 
-1. **Default remains stock SQLite** until a concrete feature needs the fork.
-2. Any engine bump is intentional: update `vendor/VERSION`, checksums, ROADMAP.
+1. **Default remains stock SQLite** for 0.2.x consumers and general local SQL.
+2. Any engine bump is intentional: update the matching `VERSION`, checksums, ROADMAP.
 3. Do not claim “libSQL extensions locally” while still on stock SQLite.
-4. System `libsqlite3` stays a non-goal for the default module.
+4. Do not claim pure classic inject until `inject.implemented` is true.
+5. System `libsqlite3` stays a non-goal for the default module.
 
-## Build shape (future)
+## R3b status
 
-```zig
-// hypothetical
-const engine = b.option(enum { sqlite, libsql }, "engine", "local engine") orelse .sqlite;
-// addCSourceFile vendor/sqlite3.c  OR  vendor/libsql/sqlite3.c
-```
-
-Feature detection via `engineVersion()` + a package-level `engine_kind` enum
-exported from `root.zig` when dual engines land.
+| Step | Status |
+|------|--------|
+| Vendor libsql amalgamation + `-Dengine=libsql` | **done** (R3b.0) |
+| InjectorWal / `libsql_open_v3` apply port | next |
+| Pure `Database.sync` apply + meta advance | wired; apply fails closed until inject lands |
+| Parity vs rusty bridge | after inject |

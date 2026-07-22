@@ -32,6 +32,7 @@ test {
     _ = @import("backend/replication/grpc_web.zig");
     _ = @import("backend/replication/http.zig");
     _ = @import("backend/replication/client.zig");
+    _ = @import("backend/replication/inject.zig");
     _ = @import("backend/hrana/value_json.zig");
     _ = @import("backend/hrana/pipeline.zig");
     _ = @import("backend/hrana/http.zig");
@@ -40,6 +41,19 @@ test {
 test "engine version non-empty" {
     const v = engineVersion();
     try std.testing.expect(v.len > 0);
+}
+
+test "engine kind and optional libsql version" {
+    const e = libsql.engine;
+    try std.testing.expect(e == .sqlite or e == .libsql);
+    if (e == .libsql) {
+        const lv = libsql.libsqlVersion() orelse return error.TestUnexpectedResult;
+        try std.testing.expect(lv.len > 0);
+    } else {
+        try std.testing.expect(libsql.libsqlVersion() == null);
+    }
+    // R3b.0: pure inject not shipped yet.
+    try std.testing.expect(!libsql.pure_inject_available());
 }
 
 test "memory create insert select" {
