@@ -1,8 +1,22 @@
 const std = @import("std");
 
+/// Local C engine amalgamation. Only one can be linked (same SQLite symbols).
+pub const Engine = enum {
+    /// Stock SQLite amalgamation under `vendor/` (default; 0.2 consumers).
+    sqlite,
+    /// libSQL fork amalgamation under `vendor/libsql/` (R3b WAL inject path).
+    libsql,
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    const engine = b.option(
+        Engine,
+        "engine",
+        "Local amalgamation: sqlite (default) or libsql (R3b inject prerequisite)",
+    ) orelse .sqlite;
 
     const enable_rust_bridge = b.option(
         bool,
@@ -16,6 +30,7 @@ pub fn build(b: *std.Build) void {
     ) orelse "";
 
     const build_options = b.addOptions();
+    build_options.addOption(Engine, "engine", engine);
     build_options.addOption(bool, "enable_rust_bridge", enable_rust_bridge);
     build_options.addOption([]const u8, "rust_bridge_lib", rust_bridge_lib);
 
@@ -37,6 +52,15 @@ pub fn build(b: *std.Build) void {
         "-DSQLITE_DQS=0",
     };
 
+    const engine_c = switch (engine) {
+        .sqlite => b.path("vendor/sqlite3.c"),
+        .libsql => b.path("vendor/libsql/sqlite3.c"),
+    };
+    const engine_include = switch (engine) {
+        .sqlite => b.path("vendor"),
+        .libsql => b.path("vendor/libsql"),
+    };
+
     const mod = b.addModule("zig_libsql", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -44,10 +68,10 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     mod.addCSourceFile(.{
-        .file = b.path("vendor/sqlite3.c"),
+        .file = engine_c,
         .flags = &sqlite_flags,
     });
-    mod.addIncludePath(b.path("vendor"));
+    mod.addIncludePath(engine_include);
     mod.addOptions("build_options", build_options);
     // DynLib for optional rust bridge.
     if (enable_rust_bridge) {
@@ -90,10 +114,10 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     test_mod.addCSourceFile(.{
-        .file = b.path("vendor/sqlite3.c"),
+        .file = engine_c,
         .flags = &sqlite_flags,
     });
-    test_mod.addIncludePath(b.path("vendor"));
+    test_mod.addIncludePath(engine_include);
     test_mod.addOptions("build_options", build_options);
 
     const mod_tests = b.addTest(.{

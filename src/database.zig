@@ -6,12 +6,16 @@ const path_util = @import("util/path.zig");
 const Connection = @import("connection.zig").Connection;
 const remote = @import("backend/remote.zig");
 const bridge = @import("backend/bridge.zig");
+const inject = @import("backend/replication/inject.zig");
+const rep_client = @import("backend/replication/client.zig");
+const rep_meta = @import("backend/replication/meta.zig");
 
 pub const OpenOptions = struct {
     /// File path, `:memory:`, `file:…`, or remote URL (`libsql://`, `https://`, …).
     path: []const u8,
     /// When set with a local `path`, enables classic embedded-replica mode:
-    /// local file for reads + `Database.sync()` via the optional rusty bridge.
+    /// local file for reads + `Database.sync()` via rusty bridge (R1) or pure
+    /// Zig pull+inject (R3b when available).
     /// Remote-only opens use `path` as the URL instead.
     sync_url: ?[]const u8 = null,
     /// Remote auth token (never logged). Required for most remote servers and
@@ -26,8 +30,8 @@ pub const OpenOptions = struct {
     read_only: bool = false,
     /// Create file if missing (local only; default true when not read_only).
     create: bool = true,
-    /// Required for remote backends (HTTP). Ignored for pure local.
-    /// Not required for replica open (sync uses the rusty cdylib, not Hrana).
+    /// Required for remote backends (HTTP) and pure Zig replica sync (R2/R3b).
+    /// Optional for R1 rusty-bridge-only replica open.
     io: ?Io = null,
     /// Classic RYW while the libsql handle is alive during `sync()` (passed to bridge).
     read_your_writes: bool = true,
@@ -50,6 +54,8 @@ pub const Database = struct {
     read_your_writes: bool = true,
     /// Local open flags restored after `sync()` reopens the file.
     local_flags: c_int = 0,
+    /// Pure Zig replica path needs Io for gRPC-Web pull (R2.1/R3b).
+    io: ?Io = null,
 
     pub fn open(allocator: std.mem.Allocator, opts: OpenOptions) err.Error!Database {
         const parsed = path_util.parse(opts.path);
@@ -59,8 +65,13 @@ pub const Database = struct {
             if (parsed.kind != .file) return error.InvalidPath;
             if (opts.auth_token == null) return error.InvalidPath;
             if (surl.len == 0) return error.InvalidPath;
-            // Fail closed if bridge was not compiled in.
-            if (!bridge.isCompileEnabled()) return error.Unsupported;
+
+            // Apply path must exist: rusty bridge and/or pure inject engine.
+            const bridge_ok = bridge.isCompileEnabled();
+            const pure_ok = inject.engine_supports_inject;
+            if (!bridge_ok and !pure_ok) return error.Unsupported;
+            // Pure path needs Io for pull; bridge can sync without it.
+            if (!bridge_ok and opts.io == null) return error.Unsupported;
 
             const path_owned = allocator.dupe(u8, parsed.path) catch return error.OutOfMemory;
             errdefer allocator.free(path_owned);
@@ -89,6 +100,7 @@ pub const Database = struct {
                 .auth_token = token_owned,
                 .read_your_writes = opts.read_your_writes,
                 .local_flags = flags,
+                .io = opts.io,
             };
         }
 
@@ -174,16 +186,18 @@ pub const Database = struct {
         return self.sync_url != null;
     }
 
-    /// Classic embedded replica pull via the rusty bridge (R1).
+    /// Classic embedded replica pull.
+    ///
+    /// Preference order:
+    /// 1. R1 rusty bridge when compiled in (`-Denable-rust-bridge`)
+    /// 2. Pure Zig pull + inject when `inject.available()` (R3b)
     ///
     /// Closes the local SQLite handle for the duration of sync (official clients
     /// forbid concurrent open during inject), then reopens it.
     ///
     /// On failure the local handle is reopened best-effort. If that reopen also
-    /// fails, its error is returned (superseding any bridge error) to signal that
+    /// fails, its error is returned (superseding any sync error) to signal that
     /// `local_db` is null and the `Database` can no longer serve `connect()`.
-    ///
-    /// Requires `-Denable-rust-bridge=true` and a loadable `liblibsql_bridge` cdylib.
     pub fn sync(self: *Database) err.Error!SyncResult {
         const surl = self.sync_url orelse return error.Unsupported;
         const token = self.auth_token orelse return error.Unsupported;
@@ -194,7 +208,7 @@ pub const Database = struct {
             self.local_db = null;
         }
 
-        const result = bridge.syncOnce(self.path, surl, token, self.read_your_writes) catch |e| {
+        const result = self.syncImpl(surl, token) catch |e| {
             // Best-effort reopen so the Database remains usable after a failed sync.
             // If the reopen itself fails, surface that error: `local_db` is now null
             // and later `connect()` calls would silently operate on a dead handle.
@@ -206,6 +220,51 @@ pub const Database = struct {
 
         self.local_db = try openLocalPath(self.allocator, self.path, self.local_flags);
         return result;
+    }
+
+    fn syncImpl(self: *Database, surl: []const u8, token: []const u8) err.Error!SyncResult {
+        if (bridge.isCompileEnabled()) {
+            return bridge.syncOnce(self.path, surl, token, self.read_your_writes);
+        }
+        return self.syncPure(surl, token);
+    }
+
+    /// Pure Zig: gRPC-Web pull (R2.1/R3a) + WAL inject (R3b when `inject.available`).
+    fn syncPure(self: *Database, surl: []const u8, token: []const u8) err.Error!SyncResult {
+        if (!inject.available()) return error.Unsupported;
+        const io = self.io orelse return error.Unsupported;
+
+        var client = try rep_client.Client.open(io, self.allocator, surl, token, "default");
+        defer client.deinit();
+
+        var meta = (rep_meta.load(io, self.allocator, self.path) catch return error.Sql) orelse
+            rep_meta.WalIndexMeta{
+                .log_id = 0,
+                .committed_frame_no = rep_meta.WalIndexMeta.none_frame,
+            };
+
+        var pull = try client.pullUntilCaughtUp(meta.nextOffset(), null, 64);
+        defer pull.deinit();
+
+        if (pull.frames.len == 0) {
+            const fn_opt: ?i64 = if (meta.currentFrameNo()) |n| @intCast(n) else null;
+            return .{ .frame_no = fn_opt, .frames_synced = 0 };
+        }
+
+        const applied = try inject.applyFrames(self.allocator, self.path, pull.frames);
+        // Only advance meta after successful inject commit.
+        if (applied.last_commit_frame_no) |n| {
+            meta.committed_frame_no = n;
+            if (pull.log_id.len != 0) {
+                meta.log_id = rep_client.logIdFromUuidString(pull.log_id) catch meta.log_id;
+            }
+            rep_meta.save(io, self.allocator, self.path, meta) catch return error.Sql;
+        }
+
+        return .{
+            .frame_no = if (applied.last_commit_frame_no) |n| @intCast(n) else null,
+            .frames_synced = applied.frames_applied,
+        };
     }
 };
 
@@ -242,8 +301,9 @@ pub fn open(allocator: std.mem.Allocator, path: []const u8) err.Error!Connection
     return conn;
 }
 
-test "replica open without bridge is Unsupported" {
+test "replica open without bridge or libsql engine is Unsupported" {
     if (bridge.isCompileEnabled()) return;
+    if (inject.engine_supports_inject) return;
     const gpa = std.testing.allocator;
     try std.testing.expectError(error.Unsupported, Database.open(gpa, .{
         .path = "/tmp/zig-libsql-replica-test.db",
@@ -252,8 +312,20 @@ test "replica open without bridge is Unsupported" {
     }));
 }
 
+test "replica open on libsql engine without io is Unsupported when no bridge" {
+    if (bridge.isCompileEnabled()) return;
+    if (!inject.engine_supports_inject) return;
+    const gpa = std.testing.allocator;
+    try std.testing.expectError(error.Unsupported, Database.open(gpa, .{
+        .path = "/tmp/zig-libsql-replica-test.db",
+        .sync_url = "libsql://example.turso.io",
+        .auth_token = "secret",
+        // io missing → pure path closed
+    }));
+}
+
 test "replica open requires auth_token" {
-    if (!bridge.isCompileEnabled()) return;
+    if (!bridge.isCompileEnabled() and !inject.engine_supports_inject) return;
     const gpa = std.testing.allocator;
     try std.testing.expectError(error.InvalidPath, Database.open(gpa, .{
         .path = "/tmp/zig-libsql-replica-test.db",
