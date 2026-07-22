@@ -76,7 +76,6 @@ Version strings (`build.zig.zon`, `src/root.zig`) must stay in sync.
 | `src/backend/replication/` | Wire codecs + pull client + inject scaffold (R2–R3b) |
 | `src/backend/hrana/` | Pipeline JSON + HTTP transport |
 | `bridge/` | rusty `libsql_bridge` cdylib (gated; not default) |
-| `docs/rust-bridge.md` | Bridge enable + removal criteria |
 | `vendor/` | Stock SQLite pin (`VERSION`); libSQL pin (`libsql/VERSION`) |
 | `src/main.zig` | Demo CLI only (not library surface) |
 | `docs/embedded-replicas.md` | Replica design (not implemented) |
